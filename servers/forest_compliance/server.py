@@ -13,6 +13,7 @@ Tools:
     eudr_check_plots — screen a supplier list (GeoJSON FeatureCollection)
     eudr_plot_map    — PNG map of a plot: 2020 forest and loss before/after the cut-off
     eudr_overview_map — PNG map of a supplier list, each plot coloured by risk
+    supply_chain_resilience — EUDR risk x drought risk matrix for a supplier list
 
 Results are a risk screening for due diligence, not a legal determination.
 Every response carries a ``provenance`` block for the audit trail.
@@ -34,6 +35,7 @@ from typing import Any
 
 import forest
 import overview
+import resilience
 import sources
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -331,6 +333,52 @@ async def eudr_overview_map(plots: dict | str, title: str | None = None) -> list
         return [Image(data=png, format="png"), json.dumps(payload)]
     except Exception as exc:  # noqa: BLE001
         return [_error(str(exc))]
+
+
+@mcp.tool()
+async def supply_chain_resilience(plots: dict | str, drought: dict | str | None = None) -> str:
+    """
+    Build the supply-chain resilience matrix: EUDR risk x drought risk per plot.
+
+    Use this as the last step of a supplier audit, after getting each plot's
+    drought risk (e.g. drought_index of the climate_risk server). Each plot is
+    screened exactly like eudr_check_plot, then combined with its drought risk
+    into a supply status: blocked (EUDR high), review (EUDR medium), at risk
+    (EUDR low but drought medium or high) or secure, with a recommendation.
+    Copy matrix_markdown into the answer exactly as returned.
+
+    Args:
+        plots:   GeoJSON FeatureCollection (object or string) with up to 25
+                 features, as for eudr_check_plots; properties.id names each plot.
+        drought: Object mapping each plot id to its drought risk: either the
+                 level ("low", "medium", "high") or the full drought_index
+                 result for that plot (its top-level risk_level is used).
+                 Plots left out show drought risk "unknown".
+
+    Returns:
+        JSON with matrix_markdown (the table to show), one row per plot (EUDR
+        risk, deforestation after the cut-off, drought risk, supply status,
+        recommendation), a summary (count per supply status, plots missing a
+        drought result) and a provenance block.
+    """
+    try:
+        drought_by_id = resilience.parse_drought(drought)
+        results, eudr_summary, provenance, _ = await _assess_collection(plots)
+        rows = resilience.build_rows(results, drought_by_id)
+        unmatched = sorted(set(drought_by_id) - {row["id"] for row in rows})
+        payload = {
+            "matrix_markdown": resilience.markdown_table(rows),
+            "rows": rows,
+            "summary": {**resilience.summarise(rows), "eudr": eudr_summary},
+            "provenance": {
+                **provenance,
+                "drought_risk_from": "passed in by the caller (e.g. climate_risk drought_index, ERA5)",
+                "unmatched_drought_ids": unmatched,
+            },
+        }
+        return json.dumps(payload)
+    except Exception as exc:  # noqa: BLE001
+        return _error(str(exc))
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ Check the consolidated text on EUR-Lex before relying on these dates.
 | `eudr_check_plots` | `plots`: GeoJSON FeatureCollection, up to 25 features; `properties.id` or `name` is echoed back | One entry per plot (or its error) plus a `summary`: count per risk level, high-risk share, total area, total deforestation after the cut-off |
 | `eudr_plot_map` | Same as `eudr_check_plot` (plots up to 2,500 ha, inside one 10° tile) | PNG map + JSON legend |
 | `eudr_overview_map` | `plots`: FeatureCollection (up to 25, within 5° × 5°); optional `title` | PNG map (~15-20 KB) of all plots, each outlined and labelled in its risk colour over the 2020 forest fraction; then the batch summary, one short entry per plot and provenance |
+| `supply_chain_resilience` | `plots`: FeatureCollection (up to 25); `drought`: object mapping each plot id to its drought risk (`low` / `medium` / `high`, or the full `drought_index` result of the climate_risk server) | `matrix_markdown` (ready-to-show table: Farm, EUDR risk, Drought risk, Supply status, Recommendation), one row per plot, a summary per supply status and provenance |
 
 Areas returned (`areas_ha`): `plot_ha`, `forest_2020_ha`,
 `loss_before_cutoff_ha` (2001-2020, allowed), `loss_after_cutoff_ha` (any land),
@@ -46,6 +47,23 @@ artifacts and keeps the bytes out of the LLM context.
 cut-off; light red = tree cover lost after the cut-off on non-forest land; yellow
 = loss before the cut-off; beige = not forest in 2020; black line = plot
 boundary (surroundings are faded).
+
+### Resilience matrix
+
+`supply_chain_resilience` combines this server's EUDR screening with a drought
+risk computed elsewhere (normally `drought_index` of the `climate_risk` server,
+passed in by the agent). The table is built in code, not by the LLM, so small
+models cannot misreport a risk level. Supply status per plot:
+
+| EUDR risk | Drought risk | Supply status |
+|---|---|---|
+| high | any | 🔴 blocked |
+| medium (or not assessed) | any | 🟠 review |
+| low | medium or high | 🟠 at risk |
+| low | low or unknown | 🟢 secure |
+
+The recommendation joins a fixed EUDR action and a fixed drought action for the
+two levels.
 
 ## Method
 
@@ -72,11 +90,12 @@ a disclaimer.
 
 | File | Contents |
 |---|---|
-| `server.py` | FastMCP and the three tools |
+| `server.py` | FastMCP and the five tools |
+| `resilience.py` | Pure logic for the EUDR × drought resilience matrix |
 | `forest.py` | Pure logic (no I/O): geometry, area, Hansen tiles, tallies, risk assessment, PNG rendering |
 | `sources.py` | Remote raster reads with rasterio/GDAL (`/vsicurl/`), including a low-resolution forest background from the COG overviews |
 | `overview.py` | Overview map rendering (matplotlib, headless): aspect-aware figure, collision-free labels, palette PNG |
-| `test_forest.py`, `test_overview.py` | Offline tests (pytest), no network, no LLM |
+| `test_forest.py`, `test_overview.py`, `test_resilience.py` | Offline tests (pytest), no network, no LLM |
 | `test.py` | Live test over MCP/HTTP against the real datasets (no LLM); writes `eudr_map.png` |
 | `examples/cocoa_cooperative.geojson` | Five illustrative cocoa plots for a demo batch (one high risk) |
 
