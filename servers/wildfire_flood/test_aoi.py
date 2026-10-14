@@ -1,0 +1,67 @@
+"""Unit tests for aoi.py: input parsing, area, bbox and coverage (no network)."""
+
+import json
+
+import aoi
+import pytest
+
+BOX = [-118.17, 34.17, -118.02, 34.27]
+
+
+def test_bbox_input_becomes_closed_polygon():
+    geom, how = aoi.to_area(bbox=BOX)
+    ring = geom["coordinates"][0]
+    assert how == "bounding box" and ring[0] == ring[-1] and len(ring) == 5
+    assert aoi.bbox(geom) == tuple(BOX)
+
+
+def test_area_of_bbox_matches_planar_estimate():
+    geom, _ = aoi.to_area(bbox=BOX)
+    # 0.15° x 0.10° at 34.2°N: ~13.8 km x 11.1 km
+    assert aoi.area_km2(geom) == pytest.approx(153.2, rel=0.01)
+
+
+def test_circle_area_and_centre():
+    geom, how = aoi.to_area(latitude=34.2, longitude=-118.1, radius_km=5)
+    assert "5 km" in how
+    assert aoi.area_km2(geom) == pytest.approx(3.14159 * 25, rel=0.01)
+    lat, lon = aoi.centroid(geom)
+    assert lat == pytest.approx(34.2, abs=1e-3) and lon == pytest.approx(-118.1, abs=1e-3)
+
+
+def test_feature_collection_string_is_unwrapped():
+    polygon = aoi.to_area(bbox=BOX)[0]
+    collection = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": polygon}]}
+    geom, how = aoi.to_area(geometry=json.dumps(collection))
+    assert geom == polygon and how == "GeoJSON geometry"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"bbox": BOX, "latitude": 1.0, "longitude": 1.0},
+        {"bbox": [1, 2, 0, 3]},
+        {"latitude": 34.0},
+        {"geometry": {"type": "Point", "coordinates": [0, 0]}},
+        {"latitude": 34.0, "longitude": -118.0, "radius_km": 40},
+        {"bbox": [-120, 30, -119, 31]},  # ~10,600 km², over the limit
+    ],
+)
+def test_invalid_inputs_raise(kwargs):
+    with pytest.raises(ValueError):
+        aoi.to_area(**kwargs)
+
+
+def test_fingerprint_is_stable_and_input_specific():
+    a = aoi.to_area(bbox=BOX)[0]
+    b = aoi.to_area(bbox=[-118.17, 34.17, -118.02, 34.28])[0]
+    assert aoi.fingerprint(a) == aoi.fingerprint(json.loads(json.dumps(a)))
+    assert aoi.fingerprint(a) != aoi.fingerprint(b)
+
+
+def test_coverage_of_footprint():
+    geom = aoi.to_area(bbox=[0, 0, 0.2, 0.2])[0]
+    half = aoi.to_area(bbox=[0, 0, 0.1, 0.2])[0]
+    assert aoi.coverage(geom, geom) == 1.0
+    assert aoi.coverage(geom, half) == pytest.approx(0.5)
