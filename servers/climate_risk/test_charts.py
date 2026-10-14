@@ -1,5 +1,8 @@
 """Offline test for the chart renderer (no network, no LLM).
 
+Renders a chart covering every McKee class and checks that the output is a
+valid PNG of the expected size and small enough to return inline.
+
 Run from this directory: python -m pytest test_charts.py -q
 """
 
@@ -19,7 +22,7 @@ def test_drought_chart_png_is_small_valid_png():
     ]
     spi = [{**e, "index": e["index"] * 0.8} for e in spei]
     png = charts.drought_chart_png(spei, spi, 3, "Drought at test", "footer")
-    assert png.startswith(b"\x89PNG\r\n\x1a\n")
-    width, height = struct.unpack(">II", png[16:24])
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")  # PNG signature
+    width, height = struct.unpack(">II", png[16:24])  # IHDR width/height (big-endian)
     assert (width, height) == (800, 360)
     assert len(png) < 40_000  # small enough to return inline (EVE stores it as an artifact)

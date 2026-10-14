@@ -1,5 +1,10 @@
 """Live smoke test for the Climate Risk server over MCP (needs internet, no LLM).
 
+Connects as an MCP client over streamable HTTP, lists the tools and calls them
+with real locations (Madrid, a cocoa plot in Côte d'Ivoire) against the live
+Open-Meteo API, printing the key numbers. Not collected by pytest (the file
+name does not start with ``test_``).
+
 Start the server first (python server.py), then run: python test.py [url]
 """
 
@@ -22,6 +27,7 @@ SOUBRE_PLOT = json.dumps({
 
 
 async def call(session: ClientSession, tool: str, args: dict) -> dict:
+    """Call a tool, parse its first (JSON) content item and fail on an ``error`` payload."""
     result = await session.call_tool(tool, args)
     payload = json.loads(result.content[0].text)
     assert "error" not in payload, payload
@@ -29,6 +35,7 @@ async def call(session: ClientSession, tool: str, args: dict) -> dict:
 
 
 async def main() -> None:
+    """Exercise climate_anomaly and drought_index end to end and print a short report."""
     async with streamablehttp_client(URL, timeout=180) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -37,7 +44,7 @@ async def main() -> None:
             assert {"climate_anomaly", "drought_index"} <= set(names)
 
             # Hackathon thread B: "average temperature in Madrid last week (ERA5)".
-            end = date.today() - timedelta(days=8)
+            end = date.today() - timedelta(days=8)  # beyond ERA5's ~5-7 day publication delay
             start = end - timedelta(days=6)
             anomaly = await call(session, "climate_anomaly", {
                 **MADRID, "start_date": start.isoformat(), "end_date": end.isoformat(),

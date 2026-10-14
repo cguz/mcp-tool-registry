@@ -15,6 +15,20 @@ Tools:
 Every response carries a ``provenance`` block (dataset, model, grid cell,
 request URL, retrieval time, method) so an agent can cite its sources.
 
+Module layout (this file is the MCP / I/O layer only):
+    server.py     MCP tool definitions, input validation, the Open-Meteo HTTP
+                  download and JSON/Image formatting of the results.
+    era5_store.py on-disk cache per ERA5 grid cell and year (saves API budget).
+    climate.py    pure statistics: anomalies, hot days, SPI/SPEI, McKee classes.
+    charts.py     matplotlib rendering of the drought chart.
+
+Tools never raise: any failure is returned as ``{"error": "..."}`` JSON so the
+calling agent can read the reason and retry with corrected arguments.
+
+Configuration (environment or ``.env`` next to this file):
+    OPEN_METEO_API_KEY      optional paid-plan key (uses the customer endpoint)
+    CLIMATE_RISK_CACHE_DIR  cache folder (default: <system temp>/climate_risk_cache)
+
 Usage:
     python server.py                               # HTTP transport (default)
     python server.py --transport stdio             # stdio transport
@@ -58,14 +72,22 @@ PUBLIC_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 CUSTOMER_ARCHIVE_URL = "https://customer-archive-api.open-meteo.com/v1/archive"
 # Optional paid-plan key. Without it the free, non-commercial tier is used.
 OPEN_METEO_API_KEY = os.getenv("OPEN_METEO_API_KEY", "").strip()
+# Default is the system temp dir: it survives server restarts, and if the OS
+# clears it the only cost is a re-download.
 CACHE_DIR = Path(os.getenv("CLIMATE_RISK_CACHE_DIR") or Path(tempfile.gettempdir()) / "climate_risk_cache")
+# Open-Meteo "models" value: pure ERA5 (0.25°), not the "best match" blend of
+# reanalyses, so results are reproducible and citable as ERA5.
 ERA5_MODEL = "era5"
-TIMEOUT = 120
+TIMEOUT = 120  # seconds per HTTP request; a cold multi-decade download is slow
+# Open-Meteo also has a per-minute quota; waiting one full minute plus a second
+# of margin guarantees the retry falls in a new minute window.
 RATE_LIMIT_WAIT_S = 61
 DEFAULT_BASELINE = (1991, 2020)  # WMO climatological standard normal
-MIN_BASELINE_YEARS = 10
-FIRST_ERA5_YEAR = 1940
+MIN_BASELINE_YEARS = 10  # below this, ranks and percentiles are too coarse to mean much
+FIRST_ERA5_YEAR = 1940  # start of the ERA5 archive on Open-Meteo
 
+# stateless_http: each HTTP request is independent (no MCP session state),
+# so the server can sit behind a load balancer or be restarted freely.
 mcp = FastMCP(SERVER_NAME, host="0.0.0.0", port=8000, stateless_http=True)
 
 
@@ -73,6 +95,12 @@ mcp = FastMCP(SERVER_NAME, host="0.0.0.0", port=8000, stateless_http=True)
 
 
 def _params(lat: float, lon: float, start: date, end: date) -> dict[str, str]:
+    """Build the Open-Meteo archive query for one location and date range.
+
+    Shared by the real download and the public ``request_url`` in the
+    provenance, so the cited URL is exactly what was requested. Days are
+    aggregated in UTC so values do not depend on the location's time zone.
+    """
     return {
         "latitude": f"{lat:.4f}",
         "longitude": f"{lon:.4f}",
@@ -85,7 +113,20 @@ def _params(lat: float, lon: float, start: date, end: date) -> dict[str, str]:
 
 
 async def _download(lat: float, lon: float, start: date, end: date) -> tuple[dict[str, list], dict[str, Any]]:
-    """One Open-Meteo archive request; waits once if the per-minute limit is hit."""
+    """Download daily ERA5 data with one Open-Meteo archive request.
+
+    This is the ``Fetcher`` injected into ``ERA5Store``. If the per-minute
+    limit is hit it waits ``RATE_LIMIT_WAIT_S`` and retries once; the daily
+    limit is not retried because waiting would not help.
+
+    Returns:
+        ``(daily, grid_cell)``: Open-Meteo's ``daily`` block
+        (``{"time": [...], "<variable>": [...]}``) and the coordinates and
+        elevation of the grid cell Open-Meteo actually used.
+
+    Raises:
+        RuntimeError: On rate limiting (after the retry) or any non-200 status.
+    """
     params = _params(lat, lon, start, end)
     url = PUBLIC_ARCHIVE_URL
     if OPEN_METEO_API_KEY:
@@ -95,6 +136,7 @@ async def _download(lat: float, lon: float, start: date, end: date) -> tuple[dic
         for attempt in (1, 2):
             started = time.monotonic()
             resp = await client.get(url, params=params)
+            # Only the per-minute limit is worth waiting for (its 429 message mentions "minutely").
             if resp.status_code == 429 and "minutely" in resp.text.lower() and attempt == 1:
                 logger.warning("Open-Meteo per-minute limit hit; retrying in %ss", RATE_LIMIT_WAIT_S)
                 await asyncio.sleep(RATE_LIMIT_WAIT_S)
@@ -118,15 +160,26 @@ async def _download(lat: float, lon: float, start: date, end: date) -> tuple[dic
 
 
 def _utc_today() -> date:
-    """Open-Meteo rejects dates after the current UTC day, whatever the local time zone."""
+    """Return today's date in UTC.
+
+    Open-Meteo rejects dates after the current UTC day, whatever the local
+    time zone; using the local date could ask for "tomorrow" in the evening
+    east of Greenwich (or early morning in the Americas the other way round).
+    """
     return datetime.now(UTC).date()
 
 
+# One shared cache for all tools, so climate_anomaly and drought_index on the
+# same location reuse the same downloaded years.
 _store = ERA5Store(CACHE_DIR, _download, today=_utc_today)
 
 
 async def _load(lat: float, lon: float, first_year: int) -> tuple[climate.Series, dict[str, Any]]:
-    """ERA5 daily series for the location's grid cell plus provenance metadata."""
+    """Return the ERA5 daily series for the location's grid cell plus provenance metadata.
+
+    Adds to the store's metadata a public, reproducible request URL for the
+    whole range and the ERA5 cell centre used as cache key.
+    """
     series, meta = await _store.series(lat, lon, first_year)
     cell = snap_to_cell(lat, lon)
     # Reproducible public URL for the whole range; never includes the API key.
@@ -135,6 +188,12 @@ async def _load(lat: float, lon: float, first_year: int) -> tuple[climate.Series
 
 
 def _baseline(start_year: int, end_year: int) -> range:
+    """Validate the baseline years and return them as an inclusive ``range``.
+
+    Raises:
+        ValueError: If the range starts before ERA5, is reversed, or is
+            shorter than ``MIN_BASELINE_YEARS``.
+    """
     if start_year < FIRST_ERA5_YEAR or end_year < start_year:
         raise ValueError(f"invalid baseline {start_year}-{end_year} (ERA5 starts in {FIRST_ERA5_YEAR})")
     if end_year - start_year + 1 < MIN_BASELINE_YEARS:
@@ -143,9 +202,17 @@ def _baseline(start_year: int, end_year: int) -> range:
 
 
 def _first_year(baseline: range, earliest_year: int | None = None) -> int:
-    """One fetch range for both tools so they share the cache for a location.
+    """Return the first year to load for a request.
 
-    Starts two years before the baseline so 24-month accumulations are complete.
+    Both tools ask for the same range by default so they share the cache for
+    a location. It starts two years before the baseline so 24-month
+    accumulations (the longest SPI/SPEI scale) are complete for the first
+    baseline year.
+
+    Args:
+        baseline: Baseline years from ``_baseline``.
+        earliest_year: Extra year that must be covered too (e.g. a period
+            before the baseline in climate_anomaly, or the chart's first month).
     """
     year = baseline.start - 2
     if earliest_year is not None:
@@ -154,6 +221,19 @@ def _first_year(baseline: range, earliest_year: int | None = None) -> int:
 
 
 def _provenance(meta: dict, lat: float, lon: float, how: str, baseline: range, method: str) -> dict:
+    """Build the ``provenance`` block attached to every tool response.
+
+    It lets an agent cite the dataset, licence, exact grid cell, request URL
+    and method, and tells it about ERA5's publication delay.
+
+    Args:
+        meta: Metadata from ``_load`` (grid cell, request URL, cache info).
+        lat: Requested latitude, before snapping to the ERA5 grid.
+        lon: Requested longitude, before snapping to the ERA5 grid.
+        how: "point" or "geometry centroid", from ``resolve_location``.
+        baseline: Baseline years used.
+        method: One-sentence description of the computation, per tool.
+    """
     return {
         "dataset": "ERA5 reanalysis (ECMWF, Copernicus Climate Change Service), daily aggregates",
         "access": "Open-Meteo Historical Weather API",
@@ -169,6 +249,7 @@ def _provenance(meta: dict, lat: float, lon: float, how: str, baseline: range, m
 
 
 def _error(message: str) -> str:
+    """Log a tool failure and return it as ``{"error": message}`` JSON for the agent."""
     logger.warning("Tool error: %s", message)
     return json.dumps({"error": message})
 
@@ -220,6 +301,7 @@ async def climate_anomaly(
             raise ValueError("period longer than 366 days")
         baseline = _baseline(baseline_start_year, baseline_end_year)
 
+        # start.year may predate the baseline (e.g. a 1980s period); load it too.
         series, meta = await _load(lat, lon, _first_year(baseline, start.year))
         latest = climate.last_complete_day(series)
         if end > latest:
@@ -296,8 +378,8 @@ async def drought_index(
 
         series, meta = await _load(lat, lon, _first_year(baseline))
 
-        precip = climate.monthly_totals(series, "precipitation_sum")
-        balance = climate.water_balance(series)
+        precip = climate.monthly_totals(series, "precipitation_sum")  # SPI input
+        balance = climate.water_balance(series)  # SPEI input
         latest_year, latest_month = climate.last_complete_month(precip)
         if end_month:
             year, month = (int(part) for part in end_month.split("-"))
@@ -312,6 +394,7 @@ async def drought_index(
         spei = [climate.standardized_for_month(balance, year, month, s, baseline) for s in scales]
         heat = climate.hot_days(series, climate.last_complete_day(series), 90, baseline)
 
+        # Overall risk is the worst signal: any one dry index or heat stress is enough to flag it.
         overall = climate.worst_risk([e["risk_level"] for e in spi + spei] + [heat["risk_level"]])
         driest = min(spi + spei, key=lambda e: e["index"])
         result = {
@@ -382,6 +465,7 @@ async def drought_chart(
         if not 12 <= months <= 120:
             raise ValueError("months must be between 12 and 120")
         baseline = _baseline(baseline_start_year, baseline_end_year)
+        # The first plotted month needs `scale` earlier months; one spare year absorbs rounding.
         first_year = _first_year(baseline, _utc_today().year - (months + scale) // 12 - 1)
         series, meta = await _load(lat, lon, first_year)
 
@@ -401,6 +485,7 @@ async def drought_chart(
             f"{meta['era5_cell_centre'][1]:.2f} · baseline {baseline.start}-{baseline.stop - 1} · "
             "empirical SPI/SPEI (McKee classes)"
         )
+        # matplotlib is blocking and CPU-bound; a worker thread keeps the event loop responsive.
         png = await asyncio.to_thread(charts.drought_chart_png, spei, spi, scale, title, footer)
 
         driest = min(spei, key=lambda e: e["index"])
@@ -422,7 +507,7 @@ async def drought_chart(
         }
         return [Image(data=png, format="png"), json.dumps(summary)]
     except Exception as exc:  # noqa: BLE001 - every failure goes back to the agent as JSON
-        return [_error(str(exc))]
+        return [_error(str(exc))]  # a list too, to match the success shape
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
 """Offline unit tests for climate.py (no network, no MCP, no LLM).
 
+Small cases check each helper; the end-to-end cases build synthetic 1989-2026
+climates with a planted drought, heatwave or hot week and check that the
+indices detect it.
+
 Run from this directory: python -m pytest test_climate.py -q
 """
 
@@ -25,7 +29,7 @@ def make_series(start: date, end: date, fn) -> climate.Series:
     return series
 
 
-BASELINE = range(1991, 2021)
+BASELINE = range(1991, 2021)  # the default WMO 1991-2020 normal
 
 
 # ─── Location ────────────────────────────────────────────────────────────────
@@ -97,6 +101,7 @@ def test_accumulate_crosses_year_boundary():
 
 
 def test_standardized_index_is_monotonic_and_centred():
+    """Larger values give larger indices, the median maps to 0, extremes stay within ±2.6."""
     baseline = [float(v) for v in range(1, 31)]
     low, mid, high = (climate.standardized_index(v, baseline) for v in (0.0, 15.5, 31.0))
     assert low < mid < high
@@ -145,6 +150,7 @@ def wet_baseline_then_drought(day: date):
 
 
 def test_drought_detected_by_spi_and_spei():
+    """Three rainless months in 2026 are extremely dry for SPI-3 and high risk for SPEI-3."""
     series = make_series(date(1989, 1, 1), date(2026, 6, 30), wet_baseline_then_drought)
     precip = climate.monthly_totals(series, "precipitation_sum")
     balance = climate.water_balance(series)
@@ -163,6 +169,8 @@ def test_drought_detected_by_spi_and_spei():
 
 
 def test_period_anomaly_hot_week():
+    """A week 8 °C above every baseline year has a large anomaly and the 100th percentile."""
+
     def climate_fn(day):
         hot = day.year == 2026 and day.month == 7 and 1 <= day.day <= 7
         return (32.0 if hot else 24.0 + (day.year % 5) * 0.2), 35.0, 1.0, 4.0
@@ -187,6 +195,7 @@ def test_period_anomaly_precipitation_percent_of_normal():
 
 
 def test_period_anomaly_window_crossing_new_year():
+    """A December-January window stays contiguous (22 days) in every baseline year."""
     series = make_series(date(1989, 1, 1), date(2027, 1, 31), lambda d: (10, 15, 1.0, 1))
     result = climate.period_anomaly(
         series, "precipitation_sum", date(2026, 12, 20), date(2027, 1, 10), BASELINE, "sum"
@@ -195,6 +204,8 @@ def test_period_anomaly_window_crossing_new_year():
 
 
 def test_hot_days_relative_to_local_normal():
+    """A 40 °C August counts as hot against the local p90 and is >3x the 9 expected days."""
+
     def fn(day):
         heatwave = day.year == 2026 and day.month == 8
         tmax = 40.0 if heatwave else 30.0 + (day.toordinal() % 10) * 0.5  # spread for a real p90
@@ -208,6 +219,7 @@ def test_hot_days_relative_to_local_normal():
 
 
 def test_index_series_tracks_drought_onset():
+    """The 12-month SPI-3 series is chronological and falls into extreme drought at the end."""
     series = make_series(date(1989, 1, 1), date(2026, 6, 30), wet_baseline_then_drought)
     precip = climate.monthly_totals(series, "precipitation_sum")
     points = climate.index_series(precip, 2026, 6, 12, 3, BASELINE)

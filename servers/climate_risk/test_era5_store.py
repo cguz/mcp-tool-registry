@@ -1,5 +1,9 @@
 """Offline tests for the ERA5 disk cache (fake downloader, no network).
 
+A fake ``fetch`` records every requested range, and "today" and the clock are
+injected, so the tests can check exactly which years are downloaded, reused or
+refreshed as time passes.
+
 Run from this directory: python -m pytest test_era5_store.py -q
 """
 
@@ -34,10 +38,12 @@ class FakeFetch:
 
 
 def run(coro):
+    """Run a coroutine to completion (the tests themselves are synchronous)."""
     return asyncio.run(coro)
 
 
 def make_store(tmp_path, fetch, today, clock):
+    """Build a store with a fixed "today", a 1 h TTL and a mutable clock (``clock[0]``)."""
     return ERA5Store(tmp_path, fetch, recent_ttl_s=3600, today=lambda: today, clock=lambda: clock[0])
 
 
@@ -64,6 +70,7 @@ def test_first_call_downloads_once_then_serves_from_disk(tmp_path):
 
 
 def test_recent_years_expire_final_years_do_not(tmp_path):
+    """After the TTL only the current (non-final) year is downloaded again."""
     fetch, clock = FakeFetch(), [1_000_000.0]
     store = make_store(tmp_path, fetch, date(2026, 10, 12), clock)
     run(store.series(40.4, -3.7, 2023))
@@ -76,6 +83,7 @@ def test_recent_years_expire_final_years_do_not(tmp_path):
 
 
 def test_previous_year_not_final_before_april(tmp_path):
+    """Before 1 April the previous year may still be ERA5T, so it expires like the current one."""
     fetch, clock = FakeFetch(), [1_000_000.0]
     store = make_store(tmp_path, fetch, date(2026, 2, 10), clock)
     run(store.series(40.4, -3.7, 2024))
@@ -86,6 +94,7 @@ def test_previous_year_not_final_before_april(tmp_path):
 
 
 def test_gaps_are_fetched_as_separate_runs(tmp_path):
+    """Only the missing years are requested, as one contiguous range, not the cached ones."""
     fetch, clock = FakeFetch(), [1_000_000.0]
     store = make_store(tmp_path, fetch, date(2026, 10, 12), clock)
     run(store.series(40.4, -3.7, 2024))  # caches 2024-2026
@@ -104,6 +113,7 @@ def test_corrupt_cache_file_is_refetched(tmp_path):
 
 @pytest.mark.parametrize("year", [2019, 2020])
 def test_leap_years_have_all_days(tmp_path, year):
+    """Splitting a multi-year response per year keeps 29 February in leap years."""
     fetch, clock = FakeFetch(), [1_000_000.0]
     store = make_store(tmp_path, fetch, date(2026, 10, 12), clock)
     series, _ = run(store.series(40.4, -3.7, year))
