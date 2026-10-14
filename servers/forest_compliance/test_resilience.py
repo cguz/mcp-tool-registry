@@ -1,4 +1,8 @@
-"""Unit tests for resilience.py (no network)."""
+"""Unit tests for resilience.py (no network).
+
+Covers parsing of the drought argument, the supply-status rule and the
+matrix rows, markdown table and summary.
+"""
 
 import json
 
@@ -18,6 +22,7 @@ import resilience
     ],
 )
 def test_drought_level(value, expected):
+    """Levels, drought_index results (dict or JSON) and junk all map to a level or "unknown"."""
     assert resilience.drought_level(value) == expected
 
 
@@ -41,10 +46,12 @@ def test_parse_drought_accepts_string_and_rejects_lists():
     ],
 )
 def test_supply_status(eudr, drought, status):
+    """EUDR high blocks, EUDR medium/unknown needs review, then drought decides at risk vs secure."""
     assert resilience.supply_status(eudr, drought) == status
 
 
 def test_rows_and_markdown():
+    """End to end over one high, one low and one failed plot: statuses, table lines and summary."""
     results = [
         {"id": "farm-01", "risk_level": "high", "deforestation_after_cutoff_ha": 2.233},
         {"id": "farm-02", "risk_level": "low", "deforestation_after_cutoff_ha": 0.0},

@@ -18,6 +18,19 @@ Tools:
 Results are a risk screening for due diligence, not a legal determination.
 Every response carries a ``provenance`` block for the audit trail.
 
+Module layout (this file only orchestrates; the work happens elsewhere):
+    server.py     MCP tools: parse arguments, run the blocking steps in a worker
+                  thread, build the JSON / image responses, turn errors into
+                  ``{"error": ...}`` so the agent can react instead of crashing.
+    forest.py     pure logic: plot geometry and area, Hansen tiles, pixel
+                  tallies, risk assessment and the single-plot PNG map.
+    sources.py    remote reads of the two rasters (rasterio over /vsicurl/).
+    overview.py   matplotlib overview map of many plots.
+    resilience.py EUDR x drought supply-chain matrix.
+
+Flow of one plot: forest.to_plot_geometry -> forest.plot_area_check ->
+sources.measure (-> forest.tally per tile) -> forest.assess -> JSON.
+
 Usage:
     python server.py                               # HTTP transport (default)
     python server.py --transport stdio             # stdio transport
@@ -48,16 +61,32 @@ logger = logging.getLogger("forest-compliance-mcp")
 
 SERVER_NAME = "Forest Compliance"
 SERVER_VERSION = "0.1.0"
+# Limits that keep one tool call within a reasonable time and response size;
+# plots are read one after another, each costing a few remote reads.
 MAX_PLOTS_PER_CALL = 25
-MAX_MAP_PLOT_HA = 2_500.0
-MAX_OVERVIEW_SPAN_DEG = 5.0
+MAX_MAP_PLOT_HA = 2_500.0  # larger plots would make the 10 m map image too big
+MAX_OVERVIEW_SPAN_DEG = 5.0  # wider regions are better split into regional maps
 
+# Stateless HTTP: every request is self-contained, so the server can be scaled
+# or restarted without losing client sessions.
 mcp = FastMCP(SERVER_NAME, host="0.0.0.0", port=8000, stateless_http=True)
 
+# Severity order of the risk levels, used to find the worst plot of a batch.
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
 def _provenance(tiles: list[str], how: str, geom_id: str) -> dict[str, Any]:
+    """Provenance block attached to every response, for the due-diligence audit trail.
+
+    It records what was assessed (plot fingerprint and how the geometry was
+    built), with which data (datasets, versions, tiles), by which method, the
+    known data gap (clearing after the last Hansen year) and when.
+
+    Args:
+        tiles: Hansen tile names read.
+        how: How the plot geometry was obtained (from ``forest.to_plot_geometry``).
+        geom_id: Plot fingerprint (``forest.plot_id``).
+    """
     return {
         "plot_id": geom_id,
         "plot_geometry_from": how,
@@ -80,13 +109,25 @@ def _provenance(tiles: list[str], how: str, geom_id: str) -> dict[str, Any]:
 
 
 def _round(stats: dict[str, Any]) -> dict[str, Any]:
+    """Round areas to 3 decimals (10 m^2) for the JSON output.
+
+    Year keys become strings, as JSON object keys must be strings anyway.
+    """
     out = {k: round(v, 3) if isinstance(v, float) else v for k, v in stats.items()}
     out["deforestation_by_year_ha"] = {str(y): round(v, 3) for y, v in stats["deforestation_by_year_ha"].items()}
     return out
 
 
 def _check_one(geom: dict, how: str) -> dict[str, Any]:
-    """Blocking: geometry checks, raster reads and assessment for one plot."""
+    """Area check, raster reads and assessment for one plot; the full eudr_check_plot result.
+
+    Blocking (remote raster reads): run it through ``asyncio.to_thread`` so the
+    event loop keeps serving other requests.
+
+    Args:
+        geom: Plot Polygon/MultiPolygon from ``forest.to_plot_geometry``.
+        how: How the geometry was obtained, for the provenance block.
+    """
     started = time.monotonic()
     plot_ha = forest.plot_area_check(geom)
     stats, tiles = sources.measure(geom)
@@ -101,15 +142,30 @@ def _check_one(geom: dict, how: str) -> dict[str, Any]:
 
 
 def _error(message: str) -> str:
+    """Log a tool failure and return it as ``{"error": message}`` JSON for the agent."""
     logger.warning("Tool error: %s", message)
     return json.dumps({"error": message})
 
 
 async def _assess_collection(plots: dict | str) -> tuple[list, dict, dict, list]:
-    """Assess every feature of a FeatureCollection.
+    """Assess every feature of a FeatureCollection; shared by all batch tools.
 
-    Returns (results, summary, provenance, drawn) where drawn holds
-    (id, geometry, risk_level) for each plot that could be assessed.
+    Plots are assessed one after another; a plot that fails (bad geometry,
+    outside coverage, read error) gets an ``{"id", "error"}`` entry instead of
+    failing the batch, so one bad record in a supplier list does not hide the
+    others.
+
+    Args:
+        plots: GeoJSON FeatureCollection as an object or JSON string.
+
+    Returns:
+        (results, summary, provenance, drawn): one compact entry per plot, the
+        batch summary, a batch provenance block (tiles of all plots), and
+        (id, geometry, risk_level) for each plot that could be assessed (used
+        to draw the overview map).
+
+    Raises:
+        ValueError: not a FeatureCollection, empty, or more than MAX_PLOTS_PER_CALL features.
     """
     collection = json.loads(plots) if isinstance(plots, str) else plots
     if collection.get("type") != "FeatureCollection":
@@ -124,7 +180,7 @@ async def _assess_collection(plots: dict | str) -> tuple[list, dict, dict, list]
     drawn = []
     for index, feature in enumerate(features):
         props = feature.get("properties") or {}
-        plot_ref = props.get("id") or props.get("name") or f"plot-{index + 1}"
+        plot_ref = props.get("id") or props.get("name") or f"plot-{index + 1}"  # 1-based, as users count
         try:
             geom, how = forest.to_plot_geometry(feature)
             full = await asyncio.to_thread(_check_one, geom, how)
@@ -165,6 +221,11 @@ async def _assess_collection(plots: dict | str) -> tuple[list, dict, dict, list]
     return results, summary, provenance, drawn
 
 
+# The docstrings of the tool functions below are the tool descriptions the LLM
+# sees: they say when to use the tool and what the arguments and result mean.
+# Implementation notes belong in comments, not in those docstrings.
+
+
 @mcp.tool()
 async def eudr_check_plot(
     geometry: dict | str | None = None,
@@ -195,6 +256,7 @@ async def eudr_check_plot(
         provenance block (datasets, versions, URLs, plot fingerprint, data gap).
         This is a risk screening, not a legal determination.
     """
+    # Errors are returned as JSON, not raised, so the agent can read them and retry.
     try:
         geom, how = forest.to_plot_geometry(geometry, latitude, longitude)
         return json.dumps(await asyncio.to_thread(_check_one, geom, how))
@@ -261,6 +323,7 @@ async def eudr_plot_map(
         if plot_ha > MAX_MAP_PLOT_HA:
             raise ValueError(f"maps are limited to {MAX_MAP_PLOT_HA:,.0f} ha plots")
         forest_2020, loss_year, inside = await asyncio.to_thread(sources.plot_rasters, geom)
+        # No assessment here: the map is evidence for a result already obtained with eudr_check_plot.
         png = forest.render_map(forest_2020, loss_year, inside)
         legend = {
             "legend": {
@@ -310,6 +373,7 @@ async def eudr_overview_map(plots: dict | str, title: str | None = None) -> list
         bounds = overview.map_bounds([geom for _, geom, _ in drawn])
         if bounds[2] - bounds[0] > MAX_OVERVIEW_SPAN_DEG or bounds[3] - bounds[1] > MAX_OVERVIEW_SPAN_DEG:
             raise ValueError(f"plots span more than {MAX_OVERVIEW_SPAN_DEG:g}°; split them into regional maps")
+        # extent is the pixel-snapped window, slightly larger than bounds; use it to place the image.
         fraction, extent = await asyncio.to_thread(sources.forest_background, bounds)
 
         heading = title or "EUDR screening"
@@ -319,6 +383,7 @@ async def eudr_overview_map(plots: dict | str, title: str | None = None) -> list
             "risk screening, not a legal determination"
         )
         png = await asyncio.to_thread(overview.overview_png, drawn, fraction, extent, heading, footer)
+        # The image carries the detail; keep the text part short to save agent context.
         brief = [
             {k: r[k] for k in ("id", "risk_level", "deforestation_after_cutoff_ha", "plot_area_ha")}
             if "error" not in r else r
@@ -362,9 +427,11 @@ async def supply_chain_resilience(plots: dict | str, drought: dict | str | None 
         drought result) and a provenance block.
     """
     try:
+        # Parse the drought argument first: a malformed one fails fast, before the slow raster reads.
         drought_by_id = resilience.parse_drought(drought)
         results, eudr_summary, provenance, _ = await _assess_collection(plots)
         rows = resilience.build_rows(results, drought_by_id)
+        # Drought ids that match no plot usually mean a typo; report them so the agent can fix it.
         unmatched = sorted(set(drought_by_id) - {row["id"] for row in rows})
         payload = {
             "matrix_markdown": resilience.markdown_table(rows),

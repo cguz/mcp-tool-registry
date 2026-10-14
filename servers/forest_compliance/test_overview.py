@@ -1,5 +1,8 @@
 """Offline tests for the overview map (no network, no LLM).
 
+Covers map bounds, figure sizing and that the rendered PNG stays small enough
+to return inline; forest.centroid is tested here because it places the markers.
+
 Run from this directory: python -m pytest test_overview.py -q
 """
 
@@ -18,6 +21,7 @@ def test_centroid_ignores_closing_vertex():
 
 
 def test_map_bounds_pads_and_enforces_minimum_span():
+    """A 1 km plot is widened to MIN_SPAN_DEG, then padded by 12 % on each side (x 1.24)."""
     west, south, east, north = overview.map_bounds([SQUARE])
     assert east - west == pytest.approx(overview.MIN_SPAN_DEG * 1.24)
     assert (west + east) / 2 == pytest.approx(0.005)
@@ -31,6 +35,7 @@ def test_map_bounds_covers_all_plots():
 
 
 def test_overview_png_is_small_valid_png():
+    """An 8 in figure at 100 dpi is 800 px wide; the palette PNG must stay under 60 KB."""
     plots = [
         ("farm-01", SQUARE, "high"),
         ("farm-02", forest.to_plot_geometry(latitude=0.02, longitude=0.02)[0], "low"),
@@ -46,6 +51,7 @@ def test_overview_png_is_small_valid_png():
 
 
 def test_figure_size_follows_ground_aspect():
+    """A wide region gets a shorter figure than a square one, within the height clamp."""
     wide = overview.figure_size((-8.0, 5.7, -6.4, 6.3))
     square = overview.figure_size((0.0, 0.0, 0.1, 0.1))
     assert wide[0] == square[0] == 8.0

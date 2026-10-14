@@ -1,8 +1,21 @@
 """
 Geometry and EUDR assessment logic for the Forest Compliance MCP server.
 
-Pure functions only (no network, no raster I/O), so they can be unit-tested
-offline. Rasters reach this module as numpy arrays.
+This is the pure core of the server: no network and no raster I/O, so every
+function here can be unit-tested offline (see test_forest.py). Rasters reach
+this module as numpy arrays already read by ``sources.py``.
+
+How it fits with the other modules:
+
+    server.py     MCP tools; parses input, calls the functions below, builds JSON.
+    forest.py     (this module) plot geometry and area, Hansen tile lookup,
+                  per-pixel tallies, risk assessment and the single-plot PNG map.
+    sources.py    reads the GFC2020 and Hansen rasters remotely and feeds the
+                  arrays to ``tally`` / ``render_map``.
+    overview.py   matplotlib map of many plots; uses ``bbox`` and ``centroid``.
+    resilience.py EUDR x drought matrix; consumes the assessed results.
+
+Sections: geometry, Hansen tiles, assessment, map rendering.
 """
 
 from __future__ import annotations
@@ -22,11 +35,17 @@ CUTOFF_YEAR = 2020
 # EUDR Art. 9(1)(d): plots of more than 4 ha need a polygon; up to 4 ha a single
 # point is enough, so a point is assessed as a circle of 4 ha around it.
 POINT_PLOT_HA = 4.0
+# Largest plot accepted (ha). Farm plots are far smaller; the cap keeps the
+# number of remote pixels read per call bounded.
 MAX_PLOT_HA = 10_000.0
+# Hansen GFC is distributed as 10 x 10 degree GeoTIFF tiles.
 TILE_DEG = 10
 
-# A tolerance for 30 m misregistration along field edges: below it, post-cutoff
-# loss is reported as "medium" (review) rather than "high".
+# Review threshold for post-cut-off deforestation: max(0.1 ha, 1 % of the plot).
+# Hansen is a 30 m product and GFC2020 a 10 m one; where a field edge is shifted
+# by one 30 m pixel between the two maps, a thin strip of "deforestation" appears
+# that is not real. Below the threshold the loss is reported as "medium"
+# (review) rather than "high".
 HIGH_RISK_MIN_HA = 0.1
 HIGH_RISK_MIN_FRACTION = 0.01
 
@@ -35,12 +54,29 @@ HIGH_RISK_MIN_FRACTION = 0.01
 
 
 def _load(obj: dict | str) -> dict:
+    """Return a GeoJSON object, parsing it first if the agent sent it as a string."""
     return json.loads(obj) if isinstance(obj, str) else obj
 
 
 def circle(lat: float, lon: float, area_ha: float = POINT_PLOT_HA, vertices: int = 64) -> dict:
-    """GeoJSON Polygon approximating a circle of the given area around a point."""
+    """GeoJSON Polygon approximating a circle of the given area around a point.
+
+    Used to turn an EUDR point geolocation into an area that can be measured
+    (see POINT_PLOT_HA). A local equirectangular approximation (metres per
+    degree of latitude, scaled by cos(lat) for longitude) is accurate enough for
+    a radius of ~113 m.
+
+    Args:
+        lat: Centre latitude in decimal degrees.
+        lon: Centre longitude in decimal degrees.
+        area_ha: Target area of the circle in hectares.
+        vertices: Number of ring vertices; 64 keeps the area within ~0.2 %.
+
+    Returns:
+        A closed GeoJSON Polygon in WGS84 lon/lat.
+    """
     radius = math.sqrt(area_ha * 10_000 / math.pi)
+    # ~111.32 km per degree of latitude; the clamp avoids dividing by zero at the poles.
     dlat = radius / 111_320.0
     dlon = radius / (111_320.0 * max(math.cos(math.radians(lat)), 1e-6))
     ring = [
@@ -59,7 +95,23 @@ def to_plot_geometry(
     """Normalize the input to a Polygon/MultiPolygon and say how it was built.
 
     Accepts a GeoJSON geometry, Feature, or single-feature FeatureCollection, or a
-    lat/lon pair. Points become a 4 ha circle (the EUDR point threshold).
+    lat/lon pair. Points become a 4 ha circle: EUDR Art. 2(28) and 9(1)(d) allow
+    plots of up to 4 ha to be geolocated by a single point, so a point stands for
+    at most 4 ha of land and is assessed as that area around it.
+
+    Args:
+        geometry: GeoJSON as a dict or JSON string (WGS84 lon/lat), or None.
+        latitude: Used with ``longitude`` when ``geometry`` is None.
+        longitude: Used with ``latitude`` when ``geometry`` is None.
+
+    Returns:
+        (geometry, how): a Polygon/MultiPolygon and a short human-readable note
+        on how it was obtained ("polygon" or "point buffered to a 4 ha circle"),
+        which ends up in the provenance block.
+
+    Raises:
+        ValueError: missing input, a FeatureCollection with other than one
+            feature, an unsupported geometry type or out-of-range coordinates.
     """
     if geometry is None:
         if latitude is None or longitude is None:
@@ -89,15 +141,18 @@ def to_plot_geometry(
 
 
 def _check_lat_lon(lat: float, lon: float) -> None:
+    """Reject coordinates outside WGS84 ranges (often a swapped lat/lon pair)."""
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError(f"coordinates out of range: lat={lat}, lon={lon}")
 
 
 def _polygons(geom: dict) -> list[list[list[list[float]]]]:
+    """List of polygons (each a list of rings), so Polygon and MultiPolygon share one code path."""
     return [geom["coordinates"]] if geom["type"] == "Polygon" else list(geom["coordinates"])
 
 
 def _vertices(geom: dict):
+    """Yield (lon, lat) for every vertex of every ring, holes included."""
     for polygon in _polygons(geom):
         for ring in polygon:
             for position in ring:
@@ -105,7 +160,12 @@ def _vertices(geom: dict):
 
 
 def _ring_area_m2(ring: list[list[float]]) -> float:
-    """Spherical ring area (Chamberlain & Duquette 2007), signed."""
+    """Signed area of a lon/lat ring on a sphere, in m^2.
+
+    Uses the formula of Chamberlain & Duquette (2007), the same one used by
+    common GeoJSON area tools, so results match what users see elsewhere. The
+    sign depends on the winding order; callers take the absolute value.
+    """
     total = 0.0
     n = len(ring)
     for i in range(n):
@@ -116,7 +176,11 @@ def _ring_area_m2(ring: list[list[float]]) -> float:
 
 
 def area_ha(geom: dict) -> float:
-    """Area of a Polygon/MultiPolygon in hectares (outer ring minus holes)."""
+    """Geodesic area of a Polygon/MultiPolygon in hectares (outer rings minus holes).
+
+    Absolute values are used per ring so the result does not depend on the
+    winding order, which GeoJSON from the field often gets wrong.
+    """
     total = 0.0
     for polygon in _polygons(geom):
         outer, *holes = polygon
@@ -125,13 +189,17 @@ def area_ha(geom: dict) -> float:
 
 
 def bbox(geom: dict) -> tuple[float, float, float, float]:
+    """Bounding box (west, south, east, north) in degrees; no antimeridian handling."""
     lons, lats = zip(*_vertices(geom), strict=True)
     return min(lons), min(lats), max(lons), max(lats)
 
 
 def centroid(geom: dict) -> tuple[float, float]:
-    """(lat, lon) mean of the outer-ring vertices, without the closing vertex;
-    good enough to place a label on a farm-sized plot."""
+    """Mean (lat, lon) of the outer-ring vertices, without the closing vertex.
+
+    Not a true area centroid, but good enough to place a marker and label on a
+    farm-sized plot. The closing vertex is skipped so it is not counted twice.
+    """
     points = []
     for polygon in _polygons(geom):
         ring = polygon[0]
@@ -140,7 +208,12 @@ def centroid(geom: dict) -> tuple[float, float]:
 
 
 def plot_id(geom: dict) -> str:
-    """Stable fingerprint of the geometry, for the audit trail."""
+    """Stable fingerprint of the geometry, for the audit trail.
+
+    The geometry is serialised canonically (sorted keys, no whitespace) before
+    hashing, so the same plot always gets the same id regardless of key order.
+    16 hex characters are plenty to tell plots apart in a report.
+    """
     canonical = json.dumps(geom, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
@@ -149,14 +222,28 @@ def plot_id(geom: dict) -> str:
 
 
 def hansen_tile_name(lat_top: int, lon_left: int) -> str:
-    """Hansen tiles are named by their top-left corner, e.g. 10N_010W."""
+    """Name of the Hansen tile with the given top-left corner, e.g. 10N_010W.
+
+    This matches the file naming of the Hansen GFC distribution.
+    """
     ns = f"{abs(lat_top):02d}{'N' if lat_top >= 0 else 'S'}"
     ew = f"{abs(lon_left):03d}{'E' if lon_left >= 0 else 'W'}"
     return f"{ns}_{ew}"
 
 
 def hansen_tiles(box: tuple[float, float, float, float]) -> list[tuple[str, tuple[float, float, float, float]]]:
-    """Hansen tiles intersecting a bbox, each with the part of the bbox it covers."""
+    """Hansen tiles intersecting a bbox, each with the part of the bbox it covers.
+
+    A plot near a tile edge can span up to four tiles; each part is then read
+    and tallied separately and the tallies merged (see ``merge_tallies``).
+
+    Args:
+        box: (west, south, east, north) in degrees.
+
+    Returns:
+        A list of (tile_name, (west, south, east, north)) pairs, north to south
+        and west to east.
+    """
     west, south, east, north = box
     tiles = []
     # A tile covers latitudes (top - 10, top]; its first row starts at the top edge.
@@ -181,15 +268,26 @@ def hansen_tiles(box: tuple[float, float, float, float]) -> list[tuple[str, tupl
 
 
 def tally(forest_2020: np.ndarray, loss_year: np.ndarray, inside: np.ndarray, pixel_ha: float) -> dict[str, Any]:
-    """Area statistics for one aligned window.
+    """Area statistics for one window where all three arrays share the same grid.
 
-    forest_2020: 1 where JRC GFC2020 maps forest on 31 Dec 2020, else 0.
-    loss_year:   Hansen lossyear code (0 = no loss, 1..N = year 2000+N), same grid.
-    inside:      True for pixels whose centre is inside the plot.
+    EUDR "deforestation after the cut-off" is the intersection of two maps: land
+    that GFC2020 maps as forest on 31 Dec 2020 AND that Hansen records as losing
+    tree cover in 2021 or later. Loss on land that was not forest in 2020 (e.g.
+    plantation rotation) is counted separately, as is loss before the cut-off.
+
+    Args:
+        forest_2020: 1 where JRC GFC2020 maps forest on 31 Dec 2020, else 0.
+        loss_year: Hansen lossyear code (0 = no loss, 1..N = year 2000+N), same grid.
+        inside: True for pixels whose centre is inside the plot.
+        pixel_ha: Area of one pixel in hectares (see ``pixel_area_ha``).
+
+    Returns:
+        Pixel count and areas in hectares; ``deforestation_by_year_ha`` maps
+        the calendar year to the hectares deforested that year.
     """
     forest = (forest_2020 == 1) & inside
     loss = (loss_year > 0) & inside
-    after = loss & (loss_year > CUTOFF_YEAR - 2000)
+    after = loss & (loss_year > CUTOFF_YEAR - 2000)  # lossyear code 21 = 2021, the first post-cut-off year
     deforested = after & forest
 
     by_year: dict[int, float] = {}
@@ -208,6 +306,11 @@ def tally(forest_2020: np.ndarray, loss_year: np.ndarray, inside: np.ndarray, pi
 
 
 def merge_tallies(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum the tallies of the per-tile parts of one plot into a single tally.
+
+    Raises:
+        ValueError: no part was read, i.e. the plot lies outside the rasters.
+    """
     if not parts:
         raise ValueError("plot does not overlap any data")
     merged: dict[str, Any] = {k: 0.0 for k in parts[0] if k != "deforestation_by_year_ha"}
@@ -223,7 +326,24 @@ def merge_tallies(parts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def assess(stats: dict[str, Any], plot_area_ha: float) -> dict[str, Any]:
-    """Turn area statistics into a risk level, a verdict and review notes."""
+    """Turn area statistics into a risk level, a verdict and review notes.
+
+    Risk levels:
+        high:   deforestation after the cut-off at or above the review threshold.
+        medium: some deforestation, but below the threshold (likely edge
+                misregistration between the 30 m and 10 m maps); needs review.
+        low:    no deforestation after the cut-off.
+
+    Notes flag loss that is not deforestation under the EUDR but is worth a look
+    (loss on non-forest land after 2020, or any loss before the cut-off).
+
+    Args:
+        stats: Output of ``tally`` / ``merge_tallies``.
+        plot_area_ha: Geodesic plot area, used to scale the review threshold.
+
+    Returns:
+        risk_level, verdict, notes and the review threshold used (ha).
+    """
     deforested = stats["deforestation_after_cutoff_ha"]
     forest = stats["forest_2020_ha"]
     other_loss = stats["loss_after_cutoff_ha"] - deforested
@@ -253,6 +373,7 @@ def assess(stats: dict[str, Any], plot_area_ha: float) -> dict[str, Any]:
         risk = "low"
         verdict = "No forest on 31 Dec 2020 and no deforestation detected after the cut-off."
 
+    # 0.01 ha (100 m^2, about one 10 m pixel) filters out rounding noise.
     if other_loss > 0.01:
         notes.append(
             f"{other_loss:.2f} ha of tree cover loss after 2020 on land not mapped as forest in 2020 "
@@ -267,6 +388,11 @@ def assess(stats: dict[str, Any], plot_area_ha: float) -> dict[str, Any]:
 
 
 def plot_area_check(geom: dict) -> float:
+    """Return the plot area in hectares after checking it is within the accepted range.
+
+    Raises:
+        ValueError: the plot has no area or exceeds MAX_PLOT_HA.
+    """
     plot_ha = area_ha(geom)
     if plot_ha <= 0:
         raise ValueError("plot has zero area")
@@ -276,13 +402,20 @@ def plot_area_check(geom: dict) -> float:
 
 
 def pixel_area_ha(lat: float, deg: float) -> float:
-    """Area of a square lat/lon pixel of `deg` degrees at latitude `lat`."""
+    """Area in hectares of a square lat/lon pixel of ``deg`` degrees at latitude ``lat``.
+
+    Both rasters are in geographic coordinates, so a pixel shrinks east-west
+    with cos(lat). One value per window (its centre latitude) is accurate
+    enough for windows of a few kilometres.
+    """
     side_m = deg * math.pi / 180.0 * EARTH_RADIUS_M
     return side_m * side_m * math.cos(math.radians(lat)) / 10_000.0
 
 
 # ─── Map rendering (dependency-free PNG) ─────────────────────────────────────
 
+# RGB colour per map class. The order matters: the first five entries are indexed
+# by the class codes returned by ``classify_pixels`` (0..4).
 MAP_COLOURS = {
     "non_forest_2020": (236, 232, 222),
     "forest_2020": (46, 125, 50),
@@ -294,7 +427,12 @@ MAP_COLOURS = {
 
 
 def classify_pixels(forest_2020: np.ndarray, loss_year: np.ndarray) -> np.ndarray:
-    """Per-pixel class index into the MAP_COLOURS order (0..4)."""
+    """Per-pixel class index into the MAP_COLOURS order (0..4).
+
+    0 non-forest, 1 forest in 2020, 2 loss before the cut-off, 3 loss after the
+    cut-off on non-forest land, 4 deforestation after the cut-off. Later
+    assignments win, so post-cut-off loss overrides the plain forest class.
+    """
     classes = np.zeros(forest_2020.shape, dtype=np.uint8)
     classes[forest_2020 == 1] = 1
     loss = loss_year > 0
@@ -306,13 +444,28 @@ def classify_pixels(forest_2020: np.ndarray, loss_year: np.ndarray) -> np.ndarra
 
 
 def render_map(forest_2020: np.ndarray, loss_year: np.ndarray, inside: np.ndarray, min_size: int = 480) -> bytes:
-    """RGB PNG of the plot surroundings: classes outside the plot are faded and
-    the plot boundary is drawn in black."""
+    """RGB PNG of the plot and its surroundings.
+
+    Classes outside the plot are faded towards white so the eye goes to the
+    plot, and the plot boundary is drawn in black. The array is upscaled by an
+    integer factor (nearest neighbour) so small plots are not a few pixels wide
+    and each data pixel stays a crisp square.
+
+    Args:
+        forest_2020: GFC2020 forest mask on the map grid.
+        loss_year: Hansen loss-year codes on the same grid.
+        inside: Plot mask on the same grid.
+        min_size: Minimum length in pixels of the longer image side.
+
+    Returns:
+        PNG bytes.
+    """
     palette = np.array(list(MAP_COLOURS.values()), dtype=np.uint8)
     rgb = palette[classify_pixels(forest_2020, loss_year)].astype(np.float32)
-    faded = rgb * 0.45 + 255 * 0.55
+    faded = rgb * 0.45 + 255 * 0.55  # blend 55 % towards white
     rgb = np.where(inside[..., None], rgb, faded)
 
+    # Boundary = inside pixels with at least one 4-neighbour outside the plot.
     edge = inside & ~(
         np.roll(inside, 1, 0) & np.roll(inside, -1, 0) & np.roll(inside, 1, 1) & np.roll(inside, -1, 1)
     )
@@ -324,12 +477,19 @@ def render_map(forest_2020: np.ndarray, loss_year: np.ndarray, inside: np.ndarra
 
 
 def encode_png(rgb: np.ndarray) -> bytes:
-    """Minimal PNG encoder for an (h, w, 3) uint8 array."""
+    """Minimal PNG encoder for an (h, w, 3) uint8 array.
+
+    Hand-written so forest.py stays free of imaging dependencies; it writes a
+    single IHDR/IDAT/IEND stream of 8-bit RGB with no row filters.
+    """
     height, width, _ = rgb.shape
+    # Each scanline starts with a filter-type byte; 0 = no filter.
     raw = b"".join(b"\x00" + rgb[row].tobytes() for row in range(height))
 
     def chunk(kind: bytes, data: bytes) -> bytes:
+        """PNG chunk: big-endian length, type, data and CRC32 over type + data."""
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
+    # IHDR: width, height, bit depth 8, colour type 2 (RGB), compression, filter, no interlace.
     header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")

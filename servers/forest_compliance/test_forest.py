@@ -1,5 +1,8 @@
 """Offline unit tests for forest.py (no network, no rasters, no LLM).
 
+Covers geometry normalisation and area, Hansen tile lookup, pixel tallies and
+the risk assessment on small synthetic grids, and the PNG map encoder.
+
 Run from this directory: python -m pytest test_forest.py -q
 """
 
@@ -25,6 +28,7 @@ def test_area_of_one_km_square():
 
 
 def test_area_subtracts_holes():
+    """A ~220 x 220 m hole (~4.9 ha) must reduce the area by more than 4 ha."""
     with_hole = {
         "type": "Polygon",
         "coordinates": [
@@ -51,6 +55,7 @@ def test_point_becomes_four_hectare_circle():
     ],
 )
 def test_geometry_wrappers(wrapper):
+    """Bare geometry, Feature, one-feature FeatureCollection and JSON string all yield the same polygon."""
     geom, how = forest.to_plot_geometry(wrapper(SQUARE_1KM))
     assert geom == SQUARE_1KM and how == "polygon"
 
@@ -69,6 +74,7 @@ def test_geojson_point_is_buffered():
     ],
 )
 def test_bad_geometries_raise(bad):
+    """Unsupported type, empty FeatureCollection and out-of-range longitude are rejected."""
     with pytest.raises(ValueError):
         forest.to_plot_geometry(bad)
 
@@ -85,6 +91,7 @@ def test_plot_area_limits():
 
 
 def test_plot_id_is_stable_and_order_insensitive_for_keys():
+    """The audit fingerprint must not depend on the key order of the GeoJSON object."""
     a = {"type": "Polygon", "coordinates": SQUARE_1KM["coordinates"]}
     b = {"coordinates": SQUARE_1KM["coordinates"], "type": "Polygon"}
     assert forest.plot_id(a) == forest.plot_id(b)
@@ -108,11 +115,13 @@ def test_tiles_for_small_plot():
 
 
 def test_tiles_for_plot_crossing_equator_and_meridian():
+    """A bbox around (0, 0) touches the four tiles that meet there."""
     names = sorted(t for t, _ in forest.hansen_tiles((-0.1, -0.1, 0.1, 0.1)))
     assert names == ["00N_000E", "00N_010W", "10N_000E", "10N_010W"]
 
 
 def test_plot_ending_on_tile_edge_keeps_its_tile():
+    """A bbox whose north edge is exactly 10N must not pull in the empty 20N tile above it."""
     assert [t for t, _ in forest.hansen_tiles((5.0, 9.5, 5.5, 10.0))] == ["10N_000E"]
 
 
@@ -135,6 +144,8 @@ def test_tally_clean_plot():
 
 
 def test_tally_separates_before_after_and_non_forest():
+    """Loss is split into before the cut-off, after it on forest (deforestation) and after it on
+    non-forest; pixels outside the plot are ignored."""
     forest_2020, loss, inside = grids()
     loss[0, 0] = 15  # 2015, forest -> before cut-off
     loss[1, 0:3] = 23  # 2023, forest -> deforestation
@@ -157,6 +168,7 @@ def test_merge_tallies_sums_parts():
 
 
 def test_assess_high_medium_low():
+    """Same 3 lost pixels: high at 1 ha/pixel, medium when tiny pixels put them below the review threshold."""
     forest_2020, loss, inside = grids()
     clean = forest.tally(forest_2020, loss, inside, 1.0)
     assert forest.assess(clean, 100)["risk_level"] == "low"
@@ -171,6 +183,7 @@ def test_assess_high_medium_low():
 
 
 def test_assess_no_forest():
+    """Loss on land that was not forest in 2020 is low risk but flagged in the notes."""
     forest_2020, loss, inside = grids()
     forest_2020[:] = 0
     loss[3, 3] = 23
@@ -180,6 +193,7 @@ def test_assess_no_forest():
 
 
 def test_pixel_area_at_equator():
+    """A Hansen pixel (0.00025 degree) is ~27.83 m square at the equator."""
     assert forest.pixel_area_ha(0.0, 0.00025) * 10_000 == pytest.approx(27.83**2, rel=0.01)
 
 
@@ -187,6 +201,7 @@ def test_pixel_area_at_equator():
 
 
 def test_classify_pixels():
+    """Each map class code: 0 non-forest, 1 forest, 2 loss before, 3 loss after on non-forest, 4 deforestation."""
     forest_2020, loss, _ = grids()
     loss[0, 0], loss[0, 1], loss[0, 6] = 10, 22, 22
     classes = forest.classify_pixels(forest_2020, loss)
@@ -195,6 +210,7 @@ def test_classify_pixels():
 
 
 def test_render_map_is_valid_png():
+    """Checks the PNG signature, the upscaled size and the uncompressed scanline length (filter byte + RGB)."""
     forest_2020, loss, inside = grids()
     inside[:2, :] = False
     png = forest.render_map(forest_2020, loss, inside, min_size=50)

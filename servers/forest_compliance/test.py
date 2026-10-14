@@ -2,6 +2,10 @@
 
 Start the server first (python server.py), then run: python test.py [url]
 The maps are written to eudr_map.png and eudr_overview.png in the current directory.
+
+Unlike the test_*.py files this is not a pytest module: it calls the running
+server over streamable HTTP and reads the real rasters, checking known places
+(a cocoa area, a national park, a city centre, a plot cleared after 2020).
 """
 
 import asyncio
@@ -31,6 +35,7 @@ CLEARED = {
 
 
 async def call(session: ClientSession, tool: str, args: dict) -> dict:
+    """Call a tool, parse the JSON of its last content item and assert it is not an error."""
     started = time.monotonic()
     result = await session.call_tool(tool, args)
     payload = json.loads(result.content[-1].text)
@@ -40,6 +45,7 @@ async def call(session: ClientSession, tool: str, args: dict) -> dict:
 
 
 async def main() -> None:
+    """Run every tool once against known locations and check the results make sense."""
     async with streamablehttp_client(URL, timeout=300) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
