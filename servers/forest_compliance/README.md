@@ -30,13 +30,19 @@ Check the consolidated text on EUR-Lex before relying on these dates.
 | `eudr_check_plot` | `geometry` (GeoJSON Polygon / MultiPolygon / Point / Feature, object or string) or `latitude` + `longitude` | `risk_level` (`low` / `medium` / `high`), `verdict`, review `notes`, areas in ha, `provenance` |
 | `eudr_check_plots` | `plots`: GeoJSON FeatureCollection, up to 25 features; `properties.id` or `name` is echoed back | One entry per plot (or its error) plus a `summary`: count per risk level, high-risk share, total area, total deforestation after the cut-off |
 | `eudr_plot_map` | Same as `eudr_check_plot` (plots up to 2,500 ha, inside one 10° tile) | PNG map + JSON legend |
+| `eudr_overview_map` | `plots`: FeatureCollection (up to 25, within 5° × 5°); optional `title` | PNG map (~15-20 KB) of all plots, each outlined and labelled in its risk colour over the 2020 forest fraction; then the batch summary, one short entry per plot and provenance |
 
 Areas returned (`areas_ha`): `plot_ha`, `forest_2020_ha`,
 `loss_before_cutoff_ha` (2001-2020, allowed), `loss_after_cutoff_ha` (any land),
 `deforestation_after_cutoff_ha` (2020 forest lost in 2021+), and
 `deforestation_by_year_ha`.
 
-Map colours: dark green = forest in 2020; dark red = 2020 forest lost after the
+Images (`eudr_plot_map`, `eudr_overview_map`) are returned inline as MCP
+`ImageContent` and kept small, in line with EVE's MCP file convention
+(`backend/docs/mcp-file-return-convention.md`): EVE stores them as chat
+artifacts and keeps the bytes out of the LLM context.
+
+`eudr_plot_map` colours: dark green = forest in 2020; dark red = 2020 forest lost after the
 cut-off; light red = tree cover lost after the cut-off on non-forest land; yellow
 = loss before the cut-off; beige = not forest in 2020; black line = plot
 boundary (surroundings are faded).
@@ -68,8 +74,9 @@ a disclaimer.
 |---|---|
 | `server.py` | FastMCP and the three tools |
 | `forest.py` | Pure logic (no I/O): geometry, area, Hansen tiles, tallies, risk assessment, PNG rendering |
-| `sources.py` | Remote raster reads with rasterio/GDAL (`/vsicurl/`) |
-| `test_forest.py` | Offline tests (pytest), no network, no LLM |
+| `sources.py` | Remote raster reads with rasterio/GDAL (`/vsicurl/`), including a low-resolution forest background from the COG overviews |
+| `overview.py` | Overview map rendering (matplotlib, headless): aspect-aware figure, collision-free labels, palette PNG |
+| `test_forest.py`, `test_overview.py` | Offline tests (pytest), no network, no LLM |
 | `test.py` | Live test over MCP/HTTP against the real datasets (no LLM); writes `eudr_map.png` |
 | `examples/cocoa_cooperative.geojson` | Five illustrative cocoa plots for a demo batch (one high risk) |
 
@@ -82,7 +89,7 @@ uv venv -p 3.13 .venv
 uv pip install -r servers/forest_compliance/requirements.txt pytest ruff
 
 cd servers/forest_compliance
-../../.venv/bin/python -m pytest -q                          # offline: 29 tests
+../../.venv/bin/python -m pytest -q                          # offline: 34 tests
 ../../.venv/bin/python server.py --port 8102                 # terminal 1
 ../../.venv/bin/python test.py http://localhost:8102/mcp     # terminal 2, live (~10 s)
 ```

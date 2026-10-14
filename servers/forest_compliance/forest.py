@@ -129,6 +129,16 @@ def bbox(geom: dict) -> tuple[float, float, float, float]:
     return min(lons), min(lats), max(lons), max(lats)
 
 
+def centroid(geom: dict) -> tuple[float, float]:
+    """(lat, lon) mean of the outer-ring vertices, without the closing vertex;
+    good enough to place a label on a farm-sized plot."""
+    points = []
+    for polygon in _polygons(geom):
+        ring = polygon[0]
+        points.extend(ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else ring)
+    return sum(p[1] for p in points) / len(points), sum(p[0] for p in points) / len(points)
+
+
 def plot_id(geom: dict) -> str:
     """Stable fingerprint of the geometry, for the audit trail."""
     canonical = json.dumps(geom, sort_keys=True, separators=(",", ":"))

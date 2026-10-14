@@ -137,3 +137,18 @@ def plot_rasters(geom: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     inside = geometry_mask([geom], out_shape=forest_2020.shape, transform=transform, invert=True)
     return forest_2020, loss_year, inside
 
+
+
+def forest_background(box: tuple[float, float, float, float], max_px: int = 900) -> tuple[np.ndarray, tuple]:
+    """Fraction of GFC2020 forest per output pixel over a bbox, read from the COG
+    overviews so large areas stay cheap. Returns (fraction, (west, south, east, north))."""
+    _check_coverage(box)
+    with rasterio.Env(**GDAL_ENV), rasterio.open("/vsicurl/" + GFC2020_URL) as gfc:
+        window = from_bounds(*box, transform=gfc.transform).round_offsets(op="floor").round_lengths(op="ceil")
+        scale = max(window.width, window.height) / max_px
+        shape = (max(1, round(window.height / max(scale, 1))), max(1, round(window.width / max(scale, 1))))
+        fraction = gfc.read(
+            1, window=window, out_shape=shape, out_dtype="float32", resampling=Resampling.average
+        )
+        bounds = gfc.window_bounds(window)
+    return fraction, bounds

@@ -1,7 +1,7 @@
 """Live smoke test for the Forest Compliance server over MCP (needs internet, no LLM).
 
 Start the server first (python server.py), then run: python test.py [url]
-The map is written to eudr_map.png in the current directory.
+The maps are written to eudr_map.png and eudr_overview.png in the current directory.
 """
 
 import asyncio
@@ -9,6 +9,7 @@ import base64
 import json
 import sys
 import time
+from pathlib import Path
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -83,6 +84,17 @@ async def main() -> None:
             with open("eudr_map.png", "wb") as f:
                 f.write(base64.b64decode(image.data))
             print(f"Map: eudr_map.png ({image.mimeType}, {time.monotonic() - started:.1f}s)")
+
+            with open(Path(__file__).parent / "examples" / "cocoa_cooperative.geojson") as f:
+                cooperative = json.load(f)
+            started = time.monotonic()
+            result = await session.call_tool("eudr_overview_map", {"plots": cooperative, "title": "Demo cooperative"})
+            image = next(c for c in result.content if c.type == "image")
+            with open("eudr_overview.png", "wb") as f:
+                f.write(base64.b64decode(image.data))
+            summary = json.loads(result.content[-1].text)["summary"]
+            print(f"Overview: eudr_overview.png, {summary['by_risk_level']} ({time.monotonic() - started:.1f}s)")
+            assert summary["by_risk_level"]["high"] == 1
             print("OK")
 
 

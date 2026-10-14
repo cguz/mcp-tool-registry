@@ -12,6 +12,7 @@ Tools:
     eudr_check_plot  — screen one plot (polygon, point or lat/lon)
     eudr_check_plots — screen a supplier list (GeoJSON FeatureCollection)
     eudr_plot_map    — PNG map of a plot: 2020 forest and loss before/after the cut-off
+    eudr_overview_map — PNG map of a supplier list, each plot coloured by risk
 
 Results are a risk screening for due diligence, not a legal determination.
 Every response carries a ``provenance`` block for the audit trail.
@@ -32,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import forest
+import overview
 import sources
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -46,6 +48,7 @@ SERVER_NAME = "Forest Compliance"
 SERVER_VERSION = "0.1.0"
 MAX_PLOTS_PER_CALL = 25
 MAX_MAP_PLOT_HA = 2_500.0
+MAX_OVERVIEW_SPAN_DEG = 5.0
 
 mcp = FastMCP(SERVER_NAME, host="0.0.0.0", port=8000, stateless_http=True)
 
@@ -98,6 +101,66 @@ def _check_one(geom: dict, how: str) -> dict[str, Any]:
 def _error(message: str) -> str:
     logger.warning("Tool error: %s", message)
     return json.dumps({"error": message})
+
+
+async def _assess_collection(plots: dict | str) -> tuple[list, dict, dict, list]:
+    """Assess every feature of a FeatureCollection.
+
+    Returns (results, summary, provenance, drawn) where drawn holds
+    (id, geometry, risk_level) for each plot that could be assessed.
+    """
+    collection = json.loads(plots) if isinstance(plots, str) else plots
+    if collection.get("type") != "FeatureCollection":
+        raise ValueError("plots must be a GeoJSON FeatureCollection")
+    features = collection.get("features", [])
+    if not features:
+        raise ValueError("the FeatureCollection has no features")
+    if len(features) > MAX_PLOTS_PER_CALL:
+        raise ValueError(f"at most {MAX_PLOTS_PER_CALL} plots per call; split the list")
+
+    results = []
+    drawn = []
+    for index, feature in enumerate(features):
+        props = feature.get("properties") or {}
+        plot_ref = props.get("id") or props.get("name") or f"plot-{index + 1}"
+        try:
+            geom, how = forest.to_plot_geometry(feature)
+            full = await asyncio.to_thread(_check_one, geom, how)
+            areas = full["areas_ha"]
+            results.append({
+                "id": plot_ref,
+                "risk_level": full["risk_level"],
+                "verdict": full["verdict"],
+                "notes": full["notes"],
+                "plot_area_ha": full["plot_area_ha"],
+                "forest_2020_ha": areas["forest_2020_ha"],
+                "deforestation_after_cutoff_ha": areas["deforestation_after_cutoff_ha"],
+                "deforestation_by_year_ha": areas["deforestation_by_year_ha"],
+                "plot_id": full["provenance"]["plot_id"],
+                "hansen_tiles": full["provenance"]["hansen_tiles"],
+            })
+            drawn.append((plot_ref, geom, full["risk_level"]))
+        except Exception as exc:  # noqa: BLE001 - one bad plot must not sink the batch
+            results.append({"id": plot_ref, "error": str(exc)})
+
+    assessed = [r for r in results if "error" not in r]
+    counts = {level: sum(1 for r in assessed if r["risk_level"] == level) for level in RISK_ORDER}
+    summary = {
+        "plots": len(results),
+        "assessed": len(assessed),
+        "failed": len(results) - len(assessed),
+        "by_risk_level": counts,
+        "high_risk_share": round(counts["high"] / len(assessed), 3) if assessed else None,
+        "total_area_ha": round(sum(r["plot_area_ha"] for r in assessed), 2),
+        "total_deforestation_after_cutoff_ha": round(
+            sum(r["deforestation_after_cutoff_ha"] for r in assessed), 3
+        ),
+        "worst_risk_level": max((r["risk_level"] for r in assessed), key=RISK_ORDER.get, default=None),
+    }
+    provenance = _provenance(
+        sorted({t for r in assessed for t in r["hansen_tiles"]}), "per plot, see results", "per plot, see results"
+    )
+    return results, summary, provenance, drawn
 
 
 @mcp.tool()
@@ -157,55 +220,7 @@ async def eudr_check_plots(plots: dict | str) -> str:
         after the cut-off, share of plots at high risk) and a provenance block.
     """
     try:
-        collection = json.loads(plots) if isinstance(plots, str) else plots
-        if collection.get("type") != "FeatureCollection":
-            raise ValueError("plots must be a GeoJSON FeatureCollection")
-        features = collection.get("features", [])
-        if not features:
-            raise ValueError("the FeatureCollection has no features")
-        if len(features) > MAX_PLOTS_PER_CALL:
-            raise ValueError(f"at most {MAX_PLOTS_PER_CALL} plots per call; split the list")
-
-        results = []
-        for index, feature in enumerate(features):
-            props = feature.get("properties") or {}
-            plot_ref = props.get("id") or props.get("name") or f"plot-{index + 1}"
-            try:
-                geom, how = forest.to_plot_geometry(feature)
-                full = await asyncio.to_thread(_check_one, geom, how)
-                areas = full["areas_ha"]
-                results.append({
-                    "id": plot_ref,
-                    "risk_level": full["risk_level"],
-                    "verdict": full["verdict"],
-                    "notes": full["notes"],
-                    "plot_area_ha": full["plot_area_ha"],
-                    "forest_2020_ha": areas["forest_2020_ha"],
-                    "deforestation_after_cutoff_ha": areas["deforestation_after_cutoff_ha"],
-                    "deforestation_by_year_ha": areas["deforestation_by_year_ha"],
-                    "plot_id": full["provenance"]["plot_id"],
-                    "hansen_tiles": full["provenance"]["hansen_tiles"],
-                })
-            except Exception as exc:  # noqa: BLE001 - one bad plot must not sink the batch
-                results.append({"id": plot_ref, "error": str(exc)})
-
-        assessed = [r for r in results if "error" not in r]
-        counts = {level: sum(1 for r in assessed if r["risk_level"] == level) for level in RISK_ORDER}
-        summary = {
-            "plots": len(results),
-            "assessed": len(assessed),
-            "failed": len(results) - len(assessed),
-            "by_risk_level": counts,
-            "high_risk_share": round(counts["high"] / len(assessed), 3) if assessed else None,
-            "total_area_ha": round(sum(r["plot_area_ha"] for r in assessed), 2),
-            "total_deforestation_after_cutoff_ha": round(
-                sum(r["deforestation_after_cutoff_ha"] for r in assessed), 3
-            ),
-            "worst_risk_level": max((r["risk_level"] for r in assessed), key=RISK_ORDER.get, default=None),
-        }
-        provenance = _provenance(
-            sorted({t for r in assessed for t in r["hansen_tiles"]}), "per plot, see results", "per plot, see results"
-        )
+        results, summary, provenance, _ = await _assess_collection(plots)
         return json.dumps({"summary": summary, "results": results, "provenance": provenance})
     except Exception as exc:  # noqa: BLE001
         return _error(str(exc))
@@ -258,6 +273,62 @@ async def eudr_plot_map(
             "provenance": _provenance([t for t, _ in forest.hansen_tiles(forest.bbox(geom))], how, forest.plot_id(geom)),
         }
         return [Image(data=png, format="png"), json.dumps(legend)]
+    except Exception as exc:  # noqa: BLE001
+        return [_error(str(exc))]
+
+
+# Image + text content; no structured (JSON-schema) output for this tool.
+@mcp.tool(structured_output=False)
+async def eudr_overview_map(plots: dict | str, title: str | None = None) -> list:
+    """
+    Draw one map of a supplier list with every plot coloured by EUDR risk.
+
+    Use this to show a cooperative or sourcing region at a glance, e.g. after
+    eudr_check_plots. Each plot is screened exactly like eudr_check_plot and
+    drawn as an outline and a labelled marker: red = high risk, orange =
+    medium, green = low. The background shades forest on 31 Dec 2020 (JRC
+    GFC2020) from beige (no forest) to dark green.
+
+    Args:
+        plots: GeoJSON FeatureCollection (object or string) with up to 25
+               features (Polygon, MultiPolygon or Point; a point becomes a 4 ha
+               circle). properties.id or properties.name labels the plot. All
+               plots together must fit within 5° x 5°.
+        title: Optional map title, e.g. the cooperative name.
+
+    Returns:
+        The PNG map followed by a JSON block with the batch summary, one short
+        entry per plot (id, risk level, deforestation after the cut-off) and a
+        provenance block.
+    """
+    try:
+        results, summary, provenance, drawn = await _assess_collection(plots)
+        if not drawn:
+            raise ValueError("no plot could be assessed; nothing to draw")
+        bounds = overview.map_bounds([geom for _, geom, _ in drawn])
+        if bounds[2] - bounds[0] > MAX_OVERVIEW_SPAN_DEG or bounds[3] - bounds[1] > MAX_OVERVIEW_SPAN_DEG:
+            raise ValueError(f"plots span more than {MAX_OVERVIEW_SPAN_DEG:g}°; split them into regional maps")
+        fraction, extent = await asyncio.to_thread(sources.forest_background, bounds)
+
+        heading = title or "EUDR screening"
+        heading += f": {summary['by_risk_level']['high']} of {summary['assessed']} plots at high risk"
+        footer = (
+            "Forest 31 Dec 2020: JRC GFC2020 V4 (10 m) · loss: Hansen GFC v1.12 (to 2024) · "
+            "risk screening, not a legal determination"
+        )
+        png = await asyncio.to_thread(overview.overview_png, drawn, fraction, extent, heading, footer)
+        brief = [
+            {k: r[k] for k in ("id", "risk_level", "deforestation_after_cutoff_ha", "plot_area_ha")}
+            if "error" not in r else r
+            for r in results
+        ]
+        payload = {
+            "summary": summary,
+            "plots": brief,
+            "map": {"bounds": [round(v, 5) for v in extent], "bytes": len(png)},
+            "provenance": provenance,
+        }
+        return [Image(data=png, format="png"), json.dumps(payload)]
     except Exception as exc:  # noqa: BLE001
         return [_error(str(exc))]
 

@@ -4,3 +4,5 @@ mcp[cli]==1.27.0
 # rasterio wheels bundle GDAL with HTTP range-read (/vsicurl/) support.
 rasterio>=1.4.3,<2
 numpy>=2.0
+matplotlib>=3.9,<4
+pillow>=10
