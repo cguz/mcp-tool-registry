@@ -50,6 +50,7 @@ WORLDCOVER_CLASSES = {
     100: "moss and lichen",
 }
 BUILT_UP = 50
+CROPLAND = 40
 
 
 def reflectance(dn: np.ndarray, scale: float, offset: float, nodata: int = 0) -> np.ndarray:
@@ -150,6 +151,17 @@ def burn_footprint(dnbr_x1000: np.ndarray, radius_px: int = 2, min_share: float 
     return burned & (box_sum(burned, radius_px) >= min_share * window)
 
 
+def scar_mask(dnbr_x1000: np.ndarray, land_cover: np.ndarray) -> np.ndarray:
+    """The burn scar: the despeckled footprint without cropland.
+
+    Cereal harvest between the pre- and post-fire scenes lowers NBR just like
+    fire does, so in summer dNBR flags harvested fields as burned. Cropland is
+    flat and not where debris flows start, so it is left out of the scar and
+    reported separately as "cropland change".
+    """
+    return burn_footprint(dnbr_x1000) & (land_cover != CROPLAND)
+
+
 @dataclass
 class BurnStats:
     """Area statistics of a burn scar inside the AOI."""
@@ -165,6 +177,7 @@ class BurnStats:
     mean_slope_burned_deg: float | None
     land_cover_burned_ha: dict[str, float]
     built_up_burned_ha: float
+    cropland_change_ha: float  # harvest or burn on cropland; left out of the scar
     built_up_near_ha: float
     near_km: float
 
@@ -179,7 +192,7 @@ def burn_stats(
 ) -> BurnStats:
     """Burn-scar statistics over the AOI.
 
-    The burn footprint (dNBR >= 100, despeckled by burn_footprint) is treated as one drainage area, a
+    The burn scar (dNBR >= 100, despeckled, cropland excluded; see scar_mask) is treated as one drainage area, a
     screening simplification of the per-basin USGS assessment. Built-up land
     "near" the scar is WorldCover built-up within near_km of moderate/high burn
     on steep slopes, where runoff and debris would come from; no flow routing.
@@ -189,8 +202,9 @@ def burn_stats(
     pixel_ha = pixel_m * pixel_m / 10_000
     valid = inside & np.isfinite(dnbr_x1000)
     footprint = burn_footprint(dnbr_x1000)
-    classes = severity(np.where(valid & footprint, dnbr_x1000, np.nan))
-    burned = valid & footprint
+    scar = footprint & (land_cover != CROPLAND)
+    classes = severity(np.where(valid & scar, dnbr_x1000, np.nan))
+    burned = valid & scar
     mod_high = burned & (dnbr_x1000 >= MOD_HIGH_MIN_DNBR)
     steep = slope_deg >= STEEP_SLOPE_DEG
     steep_mod_high = mod_high & steep
@@ -221,6 +235,7 @@ def burn_stats(
         mean_slope_burned_deg=round(float(slope_deg[burned].mean()), 1) if burned_px else None,
         land_cover_burned_ha=land_cover_burned,
         built_up_burned_ha=round(float((burned & built_up).sum()) * pixel_ha, 1),
+        cropland_change_ha=round(float((valid & footprint & (land_cover == CROPLAND)).sum()) * pixel_ha, 1),
         built_up_near_ha=round(float((source & built_up & ~burned).sum()) * pixel_ha, 1),
         near_km=near_km,
     )

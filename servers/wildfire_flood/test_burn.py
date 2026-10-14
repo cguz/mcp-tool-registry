@@ -72,3 +72,16 @@ def test_burn_stats_on_synthetic_scar():
     assert stats.land_cover_burned_ha == {"tree cover": stats.burned_ha}
     assert stats.built_up_near_ha == pytest.approx(50 * pixel_ha)  # only the nearby block
     assert stats.clear_share == 1.0
+    assert stats.cropland_change_ha == 0
+
+
+def test_cropland_is_left_out_of_the_scar():
+    """Harvested fields look burned in dNBR; they are reported apart, not as scar."""
+    dnbr = np.full((20, 20), 500.0)
+    land = np.full((20, 20), 10, dtype="uint8")
+    land[:, 10:] = burn.CROPLAND
+    stats = burn.burn_stats(dnbr, np.zeros((20, 20), "float32"), land, np.ones((20, 20), bool), pixel_m=20)
+    # the despeckling window trims a few pixels at the grid corners
+    assert stats.burned_ha == pytest.approx(200 * 0.04, rel=0.05)
+    assert stats.cropland_change_ha == pytest.approx(200 * 0.04, rel=0.05)
+    assert not burn.scar_mask(dnbr, land)[:, 10:].any()

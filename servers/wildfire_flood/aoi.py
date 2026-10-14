@@ -36,7 +36,8 @@ def to_area(
     Args:
         geometry: GeoJSON Polygon, MultiPolygon, Feature or one-feature
             FeatureCollection (object or JSON string), lon/lat order.
-        bbox: [west, south, east, north] in degrees (list or JSON string).
+        bbox: [west, south, east, north] in degrees (list, JSON string or
+            "west,south,east,north").
         latitude, longitude: Centre of a circular AOI...
         radius_km: ...and its radius (default 5 km).
 
@@ -87,8 +88,16 @@ def _from_geojson(geometry: dict | str) -> dict:
 
 
 def _from_bbox(bbox: list[float] | str) -> dict:
-    """Polygon of a [west, south, east, north] box."""
-    values = json.loads(bbox) if isinstance(bbox, str) else bbox
+    """Polygon of a [west, south, east, north] box.
+
+    Strings may be a JSON list or plain "west,south,east,north", the form the
+    EFFIS burnt-area tool returns, so its bbox can be passed straight through.
+    """
+    if isinstance(bbox, str):
+        text = bbox.strip()
+        values = json.loads(text) if text.startswith("[") else text.split(",")
+    else:
+        values = bbox
     if len(values) != 4:
         raise ValueError("bbox must be [west, south, east, north]")
     west, south, east, north = (float(v) for v in values)

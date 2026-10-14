@@ -71,7 +71,7 @@ def cascade_png(
     ax_map.imshow(shade, cmap="gray", vmin=-0.3, vmax=1, extent=extent, interpolation="nearest")
     # Severity only inside the AOI: the margin is read for exposure, and on shaded
     # slopes far from the fire it shows illumination speckle, not burn.
-    footprint = burn.burn_footprint(scene.dnbr) & scene.inside
+    footprint = burn.scar_mask(scene.dnbr, scene.land_cover) & scene.inside
     classes = burn.severity(_downsample(np.where(footprint, scene.dnbr, np.nan), step)).astype("float32")
     classes[classes < 1] = np.nan
     ax_map.imshow(classes, cmap=ListedColormap(SEVERITY_COLOURS), vmin=0.5, vmax=4.5, extent=extent,
@@ -106,7 +106,10 @@ def cascade_png(
     heights = [v or 0.0 for v in values]
     threshold = hazard_result["by_duration"][f"{minutes}_min"]["threshold_50pct_mm"]
     colours = ["#c62828" if threshold is not None and h >= threshold else "#1e88e5" for h in heights]
-    ax_rain.bar(stamps, heights, width=minutes / 1440, color=colours, align="edge")
+    # The edge line gives every bar at least ~1 px: over a long window a
+    # 15-minute bar is narrower than a pixel and could vanish, peak included.
+    ax_rain.bar(stamps, heights, width=minutes / 1440, color=colours, edgecolor=colours, linewidth=0.8,
+                align="edge")
     if threshold is not None:
         ax_rain.axhline(threshold, color="#c62828", linestyle="--", linewidth=1.2,
                         label=f"50 % debris-flow threshold: {threshold:g} mm / {minutes} min")

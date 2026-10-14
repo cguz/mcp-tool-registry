@@ -23,7 +23,7 @@ slopes. All data are free and need no API key.
 
 | Tool | Input | Output |
 |---|---|---|
-| `burn_severity` | `fire_start` (YYYY-MM-DD), optional `fire_end` (containment, in the past); the area as `geometry` (GeoJSON polygon, e.g. the fire perimeter), `bbox` [W, S, E, N] or `latitude` + `longitude` (+ `radius_km`, default 5) | burned ha, ha per severity class, mean dNBR, share of moderate/high burn on steep slopes, burned land cover, built-up land burned and within 2 km, scenes used, provenance |
+| `burn_severity` | `fire_start` (YYYY-MM-DD), optional `fire_end` (containment, in the past; default `fire_start` + 14 days, capped at yesterday); the area as `geometry` (GeoJSON polygon, e.g. the fire perimeter), `bbox` [W, S, E, N] or `latitude` + `longitude` (+ `radius_km`, default 5) | burned ha, ha per severity class, mean dNBR, share of moderate/high burn on steep slopes, burned land cover, built-up land burned and within 2 km, scenes used, provenance |
 | `postfire_flood_risk` | as `burn_severity`, plus `rain_start` / `rain_end` (default: today and the next 7 days, forecast) and optional `soil_kf` | `verdict` sentence, `risk_level` (low / medium / high), `likelihood`, threshold and peak rain for 15, 30 and 60 min, rain bursts above the threshold, burn summary, provenance |
 | `cascade_figure` | as `postfire_flood_risk`, plus optional `title` | PNG (~45-70 KB): severity map over terrain with built-up land, and the rain bars against the threshold line; then a JSON block with verdict and provenance |
 
@@ -54,7 +54,9 @@ chat artifacts and keeps the bytes out of the LLM context.
    as low (100–269), moderate-low (270–439), moderate-high (440–659) and high
    (≥ 660) (Key & Benson 2006). The burn footprint keeps burned pixels whose
    5 × 5 neighbourhood is at least half burned, which removes isolated
-   illumination speckle and keeps the contiguous scar.
+   illumination speckle and keeps the contiguous scar. WorldCover cropland is
+   left out of the scar (cereal harvest between the two scenes lowers NBR like
+   fire does) and reported as `cropland_change_ha`.
 4. **Hazard (USGS M1, Staley et al. 2017).**
    `likelihood = 1 / (1 + exp(−(b0 + b1·T·R + b2·F·R + b3·S·R)))` with
    T = share of the burned area at moderate/high severity on slopes ≥ 23°,
@@ -125,6 +127,9 @@ Register in a local EVE: `POST /mcp-servers` with
 - 15-minute rain is native only in North America and central Europe; elsewhere
   Open-Meteo interpolates it from hourly data, which smooths short bursts (the
   hourly model is then often the controlling one).
+- Areas above ~1,000 km² (incl. the 2 km margin) are read at 40 m or coarser,
+  which smooths slopes: the steep-burn share T, and so the likelihood, is then
+  underestimated.
 - Scenes weeks apart can differ in illumination; shaded slopes may show
   scattered low-severity pixels. Passing the fire perimeter as `geometry`
   gives the cleanest statistics.

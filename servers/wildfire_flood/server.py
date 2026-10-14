@@ -59,6 +59,10 @@ SERVER_VERSION = "0.1.0"
 DEFAULT_FORECAST_DAYS = 7
 NEAR_KM = 2.0  # radius around steep burned slopes where built-up land counts as exposed
 CACHE_SIZE = 6  # burn analyses kept in memory; the three tools often run on the same fire
+# Without a containment date the post-fire scene is searched from this many days
+# after ignition, so it does not catch the fire still burning (EFFIS, for one,
+# only gives the start date). Large Mediterranean fires mostly burn out within two weeks.
+DEFAULT_FIRE_DAYS = 14
 
 mcp = FastMCP(SERVER_NAME, host="0.0.0.0", port=8000, stateless_http=True)
 
@@ -96,6 +100,19 @@ def _burn(geom: dict, fire_start: date, fire_end: date) -> sources.BurnScene:
     if len(_burn_cache) > CACHE_SIZE:
         _burn_cache.popitem(last=False)
     return scene
+
+
+def _fire_period(fire_start: str | None, fire_end: str | None) -> tuple[date, date]:
+    """Fire start and end; the end defaults to DEFAULT_FIRE_DAYS after the start,
+    but never later than yesterday (a post-fire scene must exist)."""
+    start = _parse_date(fire_start, "fire_start")
+    if start is None:
+        raise ValueError("fire_start is required")
+    end = _parse_date(fire_end, "fire_end")
+    if end is None:
+        yesterday = datetime.now(UTC).date() - timedelta(days=1)
+        end = max(start, min(start + timedelta(days=DEFAULT_FIRE_DAYS), yesterday))
+    return start, end
 
 
 def _rain_window(rain_start: str | None, rain_end: str | None) -> tuple[date, date]:
@@ -188,10 +205,7 @@ async def _risk(
 ) -> tuple[dict, str, sources.BurnScene, dict, dict]:
     """Shared pipeline of postfire_flood_risk and cascade_figure."""
     geom, how = _area(geometry, bbox, latitude, longitude, radius_km)
-    start = _parse_date(fire_start, "fire_start")
-    if start is None:
-        raise ValueError("fire_start is required")
-    end = _parse_date(fire_end, "fire_end") or start
+    start, end = _fire_period(fire_start, fire_end)
     rain_from, rain_to = _rain_window(rain_start, rain_end)
     scene = await asyncio.to_thread(_burn, geom, start, end)
     lat, lon = aoi.centroid(geom)
@@ -217,7 +231,8 @@ async def burn_severity(
     """
     Map how large and how severe a wildfire burn scar is, from Sentinel-2.
 
-    Use this to assess a past or recent fire: burned area, severity classes,
+    Use this to assess a past or recent fire, e.g. one found with the EFFIS
+    burnt-area tool (pass its bbox and firedate): burned area, severity classes,
     how much burned on steep slopes, which land cover burned (forest,
     shrubland, built-up) and how much built-up land lies near the scar.
     Compares the clearest Sentinel-2 scene before fire_start with the clearest
@@ -225,11 +240,13 @@ async def burn_severity(
 
     Args:
         fire_start: First day of the fire, YYYY-MM-DD.
-        fire_end:   Containment day, YYYY-MM-DD (default: fire_start). Must be
-                    in the past.
+        fire_end:   Containment day, YYYY-MM-DD, in the past (default:
+                    fire_start + 14 days, e.g. when only the EFFIS fire date
+                    is known).
         geometry:   Area as GeoJSON Polygon/MultiPolygon/Feature (object or
                     string), e.g. the fire perimeter, up to 2,500 km²...
-        bbox:       ...or [west, south, east, north] in degrees...
+        bbox:       ...or [west, south, east, north] in degrees (a list or a
+                    "west,south,east,north" string, as EFFIS returns it)...
         latitude:   ...or a centre point (with longitude) and radius_km
         longitude:  (default radius 5 km).
         radius_km:  Radius around latitude/longitude, up to 30 km.
@@ -241,10 +258,7 @@ async def burn_severity(
     """
     try:
         geom, how = _area(geometry, bbox, latitude, longitude, radius_km)
-        start = _parse_date(fire_start, "fire_start")
-        if start is None:
-            raise ValueError("fire_start is required")
-        end = _parse_date(fire_end, "fire_end") or start
+        start, end = _fire_period(fire_start, fire_end)
         scene = await asyncio.to_thread(_burn, geom, start, end)
         return json.dumps({"burn": _burn_summary(scene), "provenance": _provenance(geom, how, scene, None)})
     except Exception as exc:  # noqa: BLE001 - every failure goes back to the agent as JSON
@@ -276,7 +290,7 @@ async def postfire_flood_risk(
 
     Args:
         fire_start: First day of the fire, YYYY-MM-DD.
-        fire_end:   Containment day, YYYY-MM-DD (default: fire_start).
+        fire_end:   Containment day, YYYY-MM-DD (default: fire_start + 14 days).
         geometry:   Area as GeoJSON (fire perimeter), up to 2,500 km²...
         bbox:       ...or [west, south, east, north]...
         latitude:   ...or a centre point (with longitude) and radius_km.

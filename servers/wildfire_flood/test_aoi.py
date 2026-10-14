@@ -15,6 +15,11 @@ def test_bbox_input_becomes_closed_polygon():
     assert aoi.bbox(geom) == tuple(BOX)
 
 
+@pytest.mark.parametrize("text", [json.dumps(BOX), ",".join(str(v) for v in BOX), " -118.17, 34.17,-118.02 ,34.27 "])
+def test_bbox_strings_as_json_or_effis_format(text):
+    assert aoi.bbox(aoi.to_area(bbox=text)[0]) == tuple(BOX)
+
+
 def test_area_of_bbox_matches_planar_estimate():
     geom, _ = aoi.to_area(bbox=BOX)
     # 0.15° x 0.10° at 34.2°N: ~13.8 km x 11.1 km
