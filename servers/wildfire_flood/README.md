@@ -82,6 +82,25 @@ flows in the Eaton and Palisades burn areas:
 | Peak rain, 14 Feb 2025 01:15–01:30 UTC | 12.4 mm in 15 min → likelihood ~100 %, **high** |
 | Dry week, 1–7 July 2025 | likelihood ~4 %, **low** |
 
+## Chaining with the EFFIS server
+
+The registry's `effis` server finds the fires; this server assesses what comes
+after them. `get_effis_burnt_areas` returns each fire's `bbox` (as a
+`"w,s,e,n"` string) and `firedate`, which go straight into `bbox` and
+`fire_start` here. `fire_end` then defaults to 14 days after ignition. Ask EFFIS
+for many fires (`max_features` 300) so it reaches the largest ones: it pages
+newest first and sorts by area only what it collected.
+
+Checked end to end with the EVE agent (Mistral `ministral-14b`): "largest
+wildfire in north-east Spain in August 2026" → EFFIS → Peñas de Riglos
+(Huesca, 10 Aug 2026, 18,244 ha in EFFIS) → this server:
+
+| Check | Result |
+|---|---|
+| Burned area (cropland excluded) | ~15,200 ha; ~12,000 ha high severity |
+| Rain 27 Sep–8 Oct 2026 | peak 5.4 mm in 15 min on 2 Oct vs a 3.4 mm threshold → likelihood ~90 %, **high** (three bursts above it) |
+| Forecast for the next 7 days (from 14 Oct 2026) | peak 0.5 mm in 15 min → **low** |
+
 ## Files
 
 | File | Contents |
