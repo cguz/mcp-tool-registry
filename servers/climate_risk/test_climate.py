@@ -205,3 +205,20 @@ def test_hot_days_relative_to_local_normal():
     assert heat["hot_days"] >= 31
     assert heat["risk_level"] == "high"
     assert heat["expected_hot_days"] == 9.0
+
+
+def test_index_series_tracks_drought_onset():
+    series = make_series(date(1989, 1, 1), date(2026, 6, 30), wet_baseline_then_drought)
+    precip = climate.monthly_totals(series, "precipitation_sum")
+    points = climate.index_series(precip, 2026, 6, 12, 3, BASELINE)
+    assert [p["month"] for p in points][:2] == ["2025-07", "2025-08"] and points[-1]["month"] == "2026-06"
+    assert len(points) == 12
+    assert points[-1]["class"] == "extremely dry"
+    assert points[0]["index"] > points[-1]["index"]
+
+
+def test_index_series_skips_months_without_data():
+    series = make_series(date(1989, 1, 1), date(2026, 6, 30), wet_baseline_then_drought)
+    precip = climate.monthly_totals(series, "precipitation_sum")
+    points = climate.index_series(precip, 1989, 6, 6, 3, BASELINE)  # before 1989-03 nothing accumulates
+    assert [p["month"] for p in points] == ["1989-03", "1989-04", "1989-05", "1989-06"]

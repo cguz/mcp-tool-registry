@@ -334,3 +334,24 @@ def hot_days(
         "ratio_to_expected": round(ratio, 2),
         "risk_level": risk,
     }
+
+
+def index_series(
+    monthly: dict[tuple[int, int], float],
+    year: int,
+    month: int,
+    months: int,
+    scale: int,
+    baseline_years: range,
+) -> list[dict[str, Any]]:
+    """Monthly standardized index (SPI or SPEI) for the `months` months ending at
+    (year, month); months without complete data are skipped."""
+    series = []
+    for back in range(months - 1, -1, -1):
+        y, m = _month_back(year, month, back)
+        try:
+            entry = standardized_for_month(monthly, y, m, scale, baseline_years)
+        except ValueError:
+            continue
+        series.append({"month": f"{y}-{m:02d}", "index": entry["index"], "class": entry["class"]})
+    return series

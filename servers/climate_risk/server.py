@@ -10,6 +10,7 @@ Tools:
                       the same calendar window in a 30-year baseline
     drought_index   — SPI and SPEI (1–24 months) plus recent hot days, with a
                       normalized risk level
+    drought_chart   — PNG chart of monthly SPEI/SPI over the last months
 
 Every response carries a ``provenance`` block (dataset, model, grid cell,
 request URL, retrieval time, method) so an agent can cite its sources.
@@ -33,11 +34,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+import charts
 import climate
 import httpx
 from dotenv import load_dotenv
 from era5_store import ERA5Store, snap_to_cell
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 _SERVER_DIR = Path(__file__).resolve().parent
 load_dotenv(_SERVER_DIR / ".env", override=False)
@@ -335,6 +337,92 @@ async def drought_index(
         return json.dumps(result)
     except Exception as exc:  # noqa: BLE001 - every failure goes back to the agent as JSON
         return _error(str(exc))
+
+
+# Image + text content; no structured (JSON-schema) output for this tool.
+@mcp.tool(structured_output=False)
+async def drought_chart(
+    latitude: float | None = None,
+    longitude: float | None = None,
+    geometry: dict | str | None = None,
+    label: str | None = None,
+    scale: int = 3,
+    months: int = 36,
+    baseline_start_year: int = DEFAULT_BASELINE[0],
+    baseline_end_year: int = DEFAULT_BASELINE[1],
+) -> list:
+    """
+    Draw a chart of drought conditions over the last months for a location.
+
+    Use this when the user wants to see how drought developed at a farm or
+    city, typically after drought_index. Bars are the monthly SPEI (water
+    balance) coloured by drought class (orange/brown = dry, green = wet), the
+    dark line is the SPI (precipitation only), and dashed lines mark the
+    moderately (-1), severely (-1.5) and extremely (-2) dry thresholds.
+
+    Args:
+        latitude:  Latitude in decimal degrees (WGS84). Use with longitude.
+        longitude: Longitude in decimal degrees (WGS84).
+        geometry:  Alternatively, a GeoJSON Point/Polygon/Feature (object or string);
+                   its centroid is used.
+        label:     Optional name shown in the chart title, e.g. a farm id.
+        scale:     Accumulation window in months, 1-24 (default 3, crops).
+        months:    How many months to show, 12-120 (default 36).
+        baseline_start_year: First year of the reference climate (default 1991).
+        baseline_end_year:   Last year of the reference climate (default 2020).
+
+    Returns:
+        The PNG chart followed by a JSON summary (latest SPEI/SPI, months in
+        drought, driest month) with a provenance block.
+    """
+    try:
+        lat, lon, how = climate.resolve_location(latitude, longitude, geometry)
+        if not 1 <= scale <= 24:
+            raise ValueError("scale must be between 1 and 24 months")
+        if not 12 <= months <= 120:
+            raise ValueError("months must be between 12 and 120")
+        baseline = _baseline(baseline_start_year, baseline_end_year)
+        first_year = _first_year(baseline, _utc_today().year - (months + scale) // 12 - 1)
+        series, meta = await _load(lat, lon, first_year)
+
+        precip = climate.monthly_totals(series, "precipitation_sum")
+        balance = climate.water_balance(series)
+        year, month = climate.last_complete_month(precip)
+        spei = climate.index_series(balance, year, month, months, scale, baseline)
+        spi = climate.index_series(precip, year, month, months, scale, baseline)
+        if not spei:
+            raise ValueError("not enough data to draw the chart")
+
+        place = label or f"{lat:.3f}, {lon:.3f}"
+        latest = spei[-1]
+        title = f"Drought at {place}: SPEI-{scale} {latest['index']:+.2f} ({latest['class']}) in {latest['month']}"
+        footer = (
+            f"ERA5 (ECMWF/C3S) via Open-Meteo · ERA5 cell {meta['era5_cell_centre'][0]:.2f}, "
+            f"{meta['era5_cell_centre'][1]:.2f} · baseline {baseline.start}-{baseline.stop - 1} · "
+            "empirical SPI/SPEI (McKee classes)"
+        )
+        png = await asyncio.to_thread(charts.drought_chart_png, spei, spi, scale, title, footer)
+
+        driest = min(spei, key=lambda e: e["index"])
+        summary = {
+            "location": {"latitude": lat, "longitude": lon},
+            "label": label,
+            "scale_months": scale,
+            "period": f"{spei[0]['month']} to {spei[-1]['month']}",
+            "latest": {"month": latest["month"], "spei": latest["index"], "class": latest["class"],
+                       "spi": spi[-1]["index"] if spi else None},
+            "months_moderately_dry_or_worse": sum(1 for e in spei if e["index"] < -1.0),
+            "driest_month": driest,
+            "image": {"format": "png", "bytes": len(png)},
+            "provenance": _provenance(
+                meta, lat, lon, how, baseline,
+                "Monthly empirical SPEI (precipitation minus FAO-56 ET0) and SPI ranked against "
+                "the same months of the baseline years; McKee et al. (1993) classes.",
+            ),
+        }
+        return [Image(data=png, format="png"), json.dumps(summary)]
+    except Exception as exc:  # noqa: BLE001 - every failure goes back to the agent as JSON
+        return [_error(str(exc))]
 
 
 if __name__ == "__main__":

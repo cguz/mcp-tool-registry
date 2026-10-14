@@ -13,6 +13,7 @@ hackathon thread B ("was last week unusually hot in Madrid?").
 |---|---|---|---|
 | `climate_anomaly` | Was this period warmer / wetter than normal? | `start_date`, `end_date` (YYYY-MM-DD, at most 366 days) + location | Mean temperature, mean daily maximum and total precipitation: value, 1991-2020 mean, anomaly, z-score, percentile, % of normal (precipitation) |
 | `drought_index` | Is this farm / city in drought? | Location; optional `end_month` (YYYY-MM), `scales` (months, default `[3, 6]`) | SPI and SPEI per scale with McKee class, hot days in the last 90 days, and an overall `risk_level` (`low` / `medium` / `high`) |
+| `drought_chart` | How did drought develop here? | Location; optional `label` (shown in the title), `scale` (default 3), `months` (12-120, default 36) | PNG chart (~15-20 KB): monthly SPEI bars coloured by drought class, SPI line, -1 / -1.5 / -2 thresholds; then a JSON summary (latest values, months in drought, driest month, provenance) |
 
 **Location** (same for both tools): `latitude` + `longitude`, **or** `geometry`
 (GeoJSON Point/Polygon/Feature/FeatureCollection, as an object or a string; its
@@ -51,9 +52,17 @@ method, data latency and licence.
 | `server.py` | FastMCP, the two tools, download from Open-Meteo and provenance |
 | `climate.py` | Pure calculations (no network): location, windows, SPI/SPEI, anomalies, heat |
 | `era5_store.py` | On-disk cache per ERA5 cell and year |
-| `test_climate.py`, `test_era5_store.py` | Offline tests (pytest), no network, no LLM |
+| `charts.py` | Chart rendering (matplotlib, headless), re-encoded as a 64-colour palette PNG |
+| `test_climate.py`, `test_era5_store.py`, `test_charts.py` | Offline tests (pytest), no network, no LLM |
 | `test.py` | Live test over MCP/HTTP against real ERA5 data (no LLM) |
 | `.env.template` | Optional `OPEN_METEO_API_KEY` |
+
+## Images
+
+`drought_chart` returns the PNG inline as MCP `ImageContent`, followed by a text
+block with the JSON summary. The image is kept small (palette PNG, ~15-20 KB),
+in line with EVE's MCP file convention (`backend/docs/mcp-file-return-convention.md`):
+EVE stores it as a chat artifact in S3 and keeps the bytes out of the LLM context.
 
 ## Open-Meteo limits and caching
 
@@ -87,7 +96,7 @@ uv venv -p 3.13 .venv
 uv pip install -r servers/climate_risk/requirements.txt pytest ruff
 
 cd servers/climate_risk
-../../.venv/bin/python -m pytest -q                          # offline: 34 tests
+../../.venv/bin/python -m pytest -q                          # offline: 37 tests
 ../../.venv/bin/python server.py --port 8101                 # terminal 1
 ../../.venv/bin/python test.py http://localhost:8101/mcp     # terminal 2, live
 ```
