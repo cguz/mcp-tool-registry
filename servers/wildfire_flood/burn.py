@@ -123,6 +123,7 @@ def box_sum(mask: np.ndarray, radius_px: int) -> np.ndarray:
     via cumulative sums (O(n), no SciPy dependency)."""
 
     def along(values: np.ndarray, axis: int) -> np.ndarray:
+        """Window sums along one axis: difference of a zero-padded cumulative sum."""
         size = values.shape[axis]
         pad_before = np.zeros_like(values.take([0], axis=axis)).repeat(radius_px + 1, axis=axis)
         pad_after = np.zeros_like(values.take([0], axis=axis)).repeat(radius_px, axis=axis)

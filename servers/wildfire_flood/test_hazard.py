@@ -42,6 +42,7 @@ def test_exceedances_merge_close_bursts():
 
 
 def _rain(mm_15):
+    """Two hours of rain in the fetch_rain format; mm_15=None means no 15-minute data."""
     times_15 = [f"2025-02-14T{h:02d}:{m:02d}" for h in range(2) for m in (0, 15, 30, 45)]
     mm_60 = [sum(mm_15[0:4]), sum(mm_15[4:8])] if mm_15 else [8.0, 2.0]
     return {"times_15": times_15, "mm_15": mm_15, "times_60": ["2025-02-14T01:00", "2025-02-14T02:00"],

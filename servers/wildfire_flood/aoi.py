@@ -132,16 +132,19 @@ def circle(latitude: float, longitude: float, radius_km: float) -> dict:
 
 
 def _check_lon_lat(lon: float, lat: float) -> None:
+    """Reject coordinates outside the lon/lat range (often swapped lat/lon)."""
     if not (-180 <= lon <= 180 and -90 <= lat <= 90):
         raise ValueError(f"coordinate ({lon}, {lat}) is not a valid lon/lat pair")
 
 
 def _outer_rings(geom: dict) -> list[Ring]:
+    """Outer ring of each polygon of a Polygon or MultiPolygon."""
     polygons = [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
     return [polygon[0] for polygon in polygons]
 
 
 def _polygons(geom: dict) -> list[list[Ring]]:
+    """A Polygon or MultiPolygon as a list of polygons (each a list of rings)."""
     return [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
 
 

@@ -112,9 +112,11 @@ class Grid:
 
     @property
     def shape(self) -> tuple[int, int]:
+        """(rows, columns), the NumPy order."""
         return self.height, self.width
 
     def bounds_lonlat(self) -> tuple[float, float, float, float]:
+        """Grid extent as (west, south, east, north) in degrees, to pick DEM and WorldCover tiles."""
         west, north = self.transform * (0, 0)
         east, south = self.transform * (self.width, self.height)
         return transform_bounds(self.crs, "EPSG:4326", west, south, east, north)
@@ -154,11 +156,13 @@ def search_scenes(bbox: tuple[float, float, float, float], start: date, end: dat
 
 
 def _tile_of(item: dict) -> str:
+    """MGRS tile code of a STAC item (e.g. "MGRS-30TXN"), whichever property carries it."""
     props = item["properties"]
     return props.get("grid:code") or props.get("s2:mgrs_tile") or item["id"].split("_")[1]
 
 
 def _crs_of(item: dict) -> str:
+    """CRS of a STAC item ("EPSG:32630"); older items only have proj:epsg."""
     props = item["properties"]
     return props.get("proj:code") or f"EPSG:{props['proj:epsg']}"
 
@@ -301,6 +305,7 @@ def _best_nbr(items: list[dict], grid: Grid, inside: np.ndarray) -> tuple[dict, 
 
 
 def _scene_info(item: dict, usable_share: float) -> dict:
+    """Scene identity and quality for the provenance block."""
     props = item["properties"]
     return {
         "id": item["id"],

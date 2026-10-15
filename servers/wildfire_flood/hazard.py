@@ -49,6 +49,7 @@ M1_MODELS = {
 
 
 def _slope_term(model: Model, t: float, f: float, s: float) -> float:
+    """b1·T + b2·F + b3·S: how strongly each mm of rain raises the log-odds."""
     return model.b1 * t + model.b2 * f + model.b3 * s
 
 

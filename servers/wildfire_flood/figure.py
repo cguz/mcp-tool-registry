@@ -31,6 +31,7 @@ SHADE_LEVELS = 4
 
 
 def _downsample(array: np.ndarray, step: int) -> np.ndarray:
+    """Every step-th pixel: enough for a ~450 px map and keeps the PNG small."""
     return array[::step, ::step] if step > 1 else array
 
 

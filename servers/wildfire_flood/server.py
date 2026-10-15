@@ -82,10 +82,6 @@ def _parse_date(value: str | None, name: str) -> date | None:
         raise ValueError(f"{name} must be a date like 2025-01-31") from exc
 
 
-def _area(geometry, bbox, latitude, longitude, radius_km) -> tuple[dict, str]:
-    return aoi.to_area(geometry, bbox, latitude, longitude, radius_km)
-
-
 def _burn(geom: dict, fire_start: date, fire_end: date) -> sources.BurnScene:
     """Burn analysis with a small LRU cache (blocking; run in a worker thread)."""
     key = (aoi.fingerprint(geom), fire_start, fire_end)
@@ -132,6 +128,7 @@ def _model_terms(scene: sources.BurnScene, soil_kf: float | None) -> tuple[float
 
 
 def _burn_summary(scene: sources.BurnScene) -> dict[str, Any]:
+    """Burn statistics as a JSON-ready dict."""
     stats = asdict(scene.stats)
     stats["near_km"] = NEAR_KM
     return stats
@@ -196,6 +193,7 @@ def _provenance(geom: dict, how: str, scene: sources.BurnScene, rain: dict | Non
 
 
 def _error(message: str) -> str:
+    """Log a tool failure and return it as {"error": ...} JSON for the agent."""
     logger.warning("Tool error: %s", message)
     return json.dumps({"error": message})
 
@@ -204,7 +202,7 @@ async def _risk(
     geometry, bbox, latitude, longitude, radius_km, fire_start, fire_end, rain_start, rain_end, soil_kf
 ) -> tuple[dict, str, sources.BurnScene, dict, dict]:
     """Shared pipeline of postfire_flood_risk and cascade_figure."""
-    geom, how = _area(geometry, bbox, latitude, longitude, radius_km)
+    geom, how = aoi.to_area(geometry, bbox, latitude, longitude, radius_km)
     start, end = _fire_period(fire_start, fire_end)
     rain_from, rain_to = _rain_window(rain_start, rain_end)
     scene = await asyncio.to_thread(_burn, geom, start, end)
@@ -257,7 +255,7 @@ async def burn_severity(
         built-up land burned and nearby, the scenes used, and provenance.
     """
     try:
-        geom, how = _area(geometry, bbox, latitude, longitude, radius_km)
+        geom, how = aoi.to_area(geometry, bbox, latitude, longitude, radius_km)
         start, end = _fire_period(fire_start, fire_end)
         scene = await asyncio.to_thread(_burn, geom, start, end)
         return json.dumps({"burn": _burn_summary(scene), "provenance": _provenance(geom, how, scene, None)})
