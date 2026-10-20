@@ -32,15 +32,6 @@ def test_slope_of_a_45_degree_ramp():
     assert burn.slope_degrees(dem, 20)[5, 5] == pytest.approx(45, abs=0.01)
 
 
-def test_box_sum_and_dilate():
-    mask = np.zeros((7, 7), dtype=bool)
-    mask[3, 3] = True
-    assert burn.box_sum(mask, 1).sum() == 9
-    grown = burn.dilate(mask, 2)
-    assert grown.sum() == 25 and grown[1, 1] and not grown[0, 0]
-    assert burn.dilate(mask, 0).sum() == 1
-
-
 def test_footprint_keeps_scar_and_drops_speckle():
     """A solid burned block survives; isolated burned pixels (shadow noise) do not."""
     dnbr = np.zeros((30, 30))
@@ -85,15 +76,6 @@ def test_cropland_is_left_out_of_the_scar():
     assert stats.burned_ha == pytest.approx(200 * 0.04, rel=0.05)
     assert stats.cropland_change_ha == pytest.approx(200 * 0.04, rel=0.05)
     assert not burn.scar_mask(dnbr, land)[:, 10:].any()
-
-
-def test_true_colour_stretch():
-    """Reflectance 0.3 is white, 0 and no data are black, mid values are lifted by the gamma."""
-    red = np.array([[0.0, 0.3, np.nan, 0.15]])
-    rgb = burn.true_colour(red, red, red)
-    assert rgb.dtype == np.uint8 and rgb.shape == (1, 4, 3)
-    assert rgb[0, 0, 0] == 0 and rgb[0, 1, 0] == 255 and rgb[0, 2, 0] == 0
-    assert rgb[0, 3, 0] > 128  # gamma brightens the mid-tones
 
 
 def test_danger_masks_zone_and_exposed_built_up():

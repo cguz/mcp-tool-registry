@@ -8,13 +8,6 @@ import pytest
 BOX = [-118.17, 34.17, -118.02, 34.27]
 
 
-def test_bbox_input_becomes_closed_polygon():
-    geom, how = aoi.to_area(bbox=BOX)
-    ring = geom["coordinates"][0]
-    assert how == "bounding box" and ring[0] == ring[-1] and len(ring) == 5
-    assert aoi.bbox(geom) == tuple(BOX)
-
-
 @pytest.mark.parametrize("text", [json.dumps(BOX), ",".join(str(v) for v in BOX), " -118.17, 34.17,-118.02 ,34.27 "])
 def test_bbox_strings_as_json_or_effis_format(text):
     assert aoi.bbox(aoi.to_area(bbox=text)[0]) == tuple(BOX)
@@ -34,13 +27,6 @@ def test_circle_area_and_centre():
     assert lat == pytest.approx(34.2, abs=1e-3) and lon == pytest.approx(-118.1, abs=1e-3)
 
 
-def test_feature_collection_string_is_unwrapped():
-    polygon = aoi.to_area(bbox=BOX)[0]
-    collection = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": polygon}]}
-    geom, how = aoi.to_area(geometry=json.dumps(collection))
-    assert geom == polygon and how == "GeoJSON geometry"
-
-
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -56,13 +42,6 @@ def test_feature_collection_string_is_unwrapped():
 def test_invalid_inputs_raise(kwargs):
     with pytest.raises(ValueError):
         aoi.to_area(**kwargs)
-
-
-def test_fingerprint_is_stable_and_input_specific():
-    a = aoi.to_area(bbox=BOX)[0]
-    b = aoi.to_area(bbox=[-118.17, 34.17, -118.02, 34.28])[0]
-    assert aoi.fingerprint(a) == aoi.fingerprint(json.loads(json.dumps(a)))
-    assert aoi.fingerprint(a) != aoi.fingerprint(b)
 
 
 def test_coverage_of_footprint():

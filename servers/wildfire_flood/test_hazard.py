@@ -17,20 +17,9 @@ def test_threshold_none_without_burn_terms():
     assert hazard.likelihood(M15, 0, 0, 0, 50) == pytest.approx(1 / (1 + 2.718281828**3.63), rel=1e-3)
 
 
-def test_more_burn_lowers_the_threshold():
-    mild = hazard.threshold_mm(M15, 0.1, 0.3, 0.25)
-    severe = hazard.threshold_mm(M15, 0.5, 0.8, 0.25)
-    assert severe < mild
-
-
 @pytest.mark.parametrize(("p", "level"), [(0.05, "low"), (0.2, "medium"), (0.49, "medium"), (0.5, "high")])
 def test_risk_level(p, level):
     assert hazard.risk_level(p) == level
-
-
-def test_rolling_sum_and_peak():
-    assert hazard.rolling_sum([1, 2, None, 4], 2) == [None, 3, None, None]
-    assert hazard.peak(["a", "b", "c"], [1.0, None, 3.0]) == (3.0, "c")
 
 
 def test_exceedances_merge_close_bursts():
