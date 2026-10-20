@@ -275,8 +275,13 @@ def before_after_jpeg(scene, outline_xy: list, title: str, footer: str) -> bytes
 
 def compact_png(png: bytes, colours: int = 48) -> bytes:
     """Re-encode as an optimized palette PNG so it stays small enough to return
-    inline (EVE's MCP file convention: a few tens of KB)."""
-    image = PILImage.open(io.BytesIO(png)).convert("RGB").quantize(colors=colours)
+    inline (EVE's MCP file convention: a few tens of KB).
+
+    Fast-octree quantisation keeps colours that cover only a few pixels, such as
+    the purple danger-zone line and exposed built-up land, which median-cut
+    would merge into grey.
+    """
+    image = PILImage.open(io.BytesIO(png)).convert("RGB").quantize(colors=colours, method=PILImage.Quantize.FASTOCTREE)
     out = io.BytesIO()
     image.save(out, format="PNG", optimize=True)
     return out.getvalue()
