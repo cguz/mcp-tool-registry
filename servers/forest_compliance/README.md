@@ -31,14 +31,14 @@ Check the consolidated text on EUR-Lex before relying on these dates.
 | `eudr_check_plots` | `plots`: GeoJSON FeatureCollection, up to 25 features; `properties.id` or `name` is echoed back | One entry per plot (or its error) plus a `summary`: count per risk level, high-risk share, total area, total deforestation after the cut-off |
 | `eudr_plot_map` | Same as `eudr_check_plot` (plots up to 2,500 ha, inside one 10° tile) | PNG map + JSON legend |
 | `eudr_overview_map` | `plots`: FeatureCollection (up to 25, within 5° × 5°); optional `title` | PNG map (~15-20 KB) of all plots, each outlined and labelled in its risk colour over the 2020 forest fraction; then the batch summary, one short entry per plot and provenance |
-| `supply_chain_resilience` | `plots`: FeatureCollection (up to 25); `drought`: object mapping each plot id to its drought risk (`low` / `medium` / `high`, or the full `drought_index` result of the climate_risk server) | `matrix_markdown` (ready-to-show table: Farm, EUDR risk, Drought risk, Supply status, Recommendation), one row per plot, a summary per supply status and provenance |
+| `supply_chain_resilience` | `plots`: FeatureCollection (up to 25); `drought`: object mapping each plot id to its drought risk (`low` / `medium` / `high`, or the full `drought_index` result of the climate_risk server) | A **decision map** (PNG, ~20 KB) with every plot coloured by supply status; then `matrix_markdown` (ready-to-show table: Farm, EUDR risk, Drought risk, Supply status, Recommendation), one row per plot, a summary per supply status and provenance |
 
 Areas returned (`areas_ha`): `plot_ha`, `forest_2020_ha`,
 `loss_before_cutoff_ha` (2001-2020, allowed), `loss_after_cutoff_ha` (any land),
 `deforestation_after_cutoff_ha` (2020 forest lost in 2021+), and
 `deforestation_by_year_ha`.
 
-Images (`eudr_plot_map`, `eudr_overview_map`) are returned inline as MCP
+Images (`eudr_plot_map`, `eudr_overview_map`, `supply_chain_resilience`) are returned inline as MCP
 `ImageContent` and kept small, in line with EVE's MCP file convention
 (`backend/docs/mcp-file-return-convention.md`): EVE stores them as chat
 artifacts and keeps the bytes out of the LLM context.
@@ -64,6 +64,12 @@ models cannot misreport a risk level. Supply status per plot:
 
 The recommendation joins a fixed EUDR action and a fixed drought action for the
 two levels.
+
+The decision map draws every plot over the 2020 forest background, coloured by
+its supply status: red = blocked, yellow = review, orange = at risk,
+blue = secure (blue rather than green, so it stands out from the forest). It
+answers "which farms can we buy from?" at a glance, also for 25 plots where a
+table gets long.
 
 ## Method
 

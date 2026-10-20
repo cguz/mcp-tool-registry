@@ -13,7 +13,7 @@ Tools:
     eudr_check_plots — screen a supplier list (GeoJSON FeatureCollection)
     eudr_plot_map    — PNG map of a plot: 2020 forest and loss before/after the cut-off
     eudr_overview_map — PNG map of a supplier list, each plot coloured by risk
-    supply_chain_resilience — EUDR risk x drought risk matrix for a supplier list
+    supply_chain_resilience — EUDR risk x drought risk matrix and decision map for a supplier list
 
 Results are a risk screening for due diligence, not a legal determination.
 Every response carries a ``provenance`` block for the audit trail.
@@ -368,21 +368,9 @@ async def eudr_overview_map(plots: dict | str, title: str | None = None) -> list
     """
     try:
         results, summary, provenance, drawn = await _assess_collection(plots)
-        if not drawn:
-            raise ValueError("no plot could be assessed; nothing to draw")
-        bounds = overview.map_bounds([geom for _, geom, _ in drawn])
-        if bounds[2] - bounds[0] > MAX_OVERVIEW_SPAN_DEG or bounds[3] - bounds[1] > MAX_OVERVIEW_SPAN_DEG:
-            raise ValueError(f"plots span more than {MAX_OVERVIEW_SPAN_DEG:g}°; split them into regional maps")
-        # extent is the pixel-snapped window, slightly larger than bounds; use it to place the image.
-        fraction, extent = await asyncio.to_thread(sources.forest_background, bounds)
-
         heading = title or "EUDR screening"
         heading += f": {summary['by_risk_level']['high']} of {summary['assessed']} plots at high risk"
-        footer = (
-            "Forest 31 Dec 2020: JRC GFC2020 V4 (10 m) · loss: Hansen GFC v1.12 (to 2024) · "
-            "risk screening, not a legal determination"
-        )
-        png = await asyncio.to_thread(overview.overview_png, drawn, fraction, extent, heading, footer)
+        png, extent = await _render_overview(drawn, heading)
         # The image carries the detail; keep the text part short to save agent context.
         brief = [
             {k: r[k] for k in ("id", "risk_level", "deforestation_after_cutoff_ha", "plot_area_ha")}
@@ -400,8 +388,45 @@ async def eudr_overview_map(plots: dict | str, title: str | None = None) -> list
         return [_error(str(exc))]
 
 
-@mcp.tool()
-async def supply_chain_resilience(plots: dict | str, drought: dict | str | None = None) -> str:
+async def _render_overview(
+    drawn: list[tuple[str, dict, str]],
+    heading: str,
+    classes: overview.MapClasses = overview.EUDR_CLASSES,
+) -> tuple[bytes, tuple[float, float, float, float]]:
+    """Draw assessed plots on one map over the 2020 forest background.
+
+    Shared by eudr_overview_map (plots coloured by EUDR risk) and
+    supply_chain_resilience (plots coloured by supply status).
+
+    Args:
+        drawn: (label, geometry, class key) per plot, as built by _assess_collection.
+        heading: Map title.
+        classes: Colours and legend of the class keys.
+
+    Returns:
+        (png, extent): the compact PNG and the (west, south, east, north) it covers.
+
+    Raises:
+        ValueError: when no plot could be assessed or the plots span too wide an area.
+    """
+    if not drawn:
+        raise ValueError("no plot could be assessed; nothing to draw")
+    bounds = overview.map_bounds([geom for _, geom, _ in drawn])
+    if bounds[2] - bounds[0] > MAX_OVERVIEW_SPAN_DEG or bounds[3] - bounds[1] > MAX_OVERVIEW_SPAN_DEG:
+        raise ValueError(f"plots span more than {MAX_OVERVIEW_SPAN_DEG:g}°; split them into regional maps")
+    # extent is the pixel-snapped window, slightly larger than bounds; use it to place the image.
+    fraction, extent = await asyncio.to_thread(sources.forest_background, bounds)
+    footer = (
+        "Forest 31 Dec 2020: JRC GFC2020 V4 (10 m) · loss: Hansen GFC v1.12 (to 2024) · "
+        "risk screening, not a legal determination"
+    )
+    png = await asyncio.to_thread(overview.overview_png, drawn, fraction, extent, heading, footer, classes)
+    return png, extent
+
+
+# Image + text content; no structured (JSON-schema) output for this tool.
+@mcp.tool(structured_output=False)
+async def supply_chain_resilience(plots: dict | str, drought: dict | str | None = None) -> list:
     """
     Build the supply-chain resilience matrix: EUDR risk x drought risk per plot.
 
@@ -410,7 +435,8 @@ async def supply_chain_resilience(plots: dict | str, drought: dict | str | None 
     screened exactly like eudr_check_plot, then combined with its drought risk
     into a supply status: blocked (EUDR high), review (EUDR medium), at risk
     (EUDR low but drought medium or high) or secure, with a recommendation.
-    Copy matrix_markdown into the answer exactly as returned.
+    Also draws a decision map with every plot coloured by its supply status.
+    Show the map and copy matrix_markdown into the answer exactly as returned.
 
     Args:
         plots:   GeoJSON FeatureCollection (object or string) with up to 25
@@ -421,31 +447,46 @@ async def supply_chain_resilience(plots: dict | str, drought: dict | str | None 
                  Plots left out show drought risk "unknown".
 
     Returns:
-        JSON with matrix_markdown (the table to show), one row per plot (EUDR
-        risk, deforestation after the cut-off, drought risk, supply status,
-        recommendation), a summary (count per supply status, plots missing a
-        drought result) and a provenance block.
+        The decision map (PNG: red = blocked, yellow = review, orange = at risk,
+        green = secure) followed by JSON with matrix_markdown (the table to
+        show), one row per plot (EUDR risk, deforestation after the cut-off,
+        drought risk, supply status, recommendation), a summary (count per
+        supply status, plots missing a drought result) and a provenance block.
     """
     try:
         # Parse the drought argument first: a malformed one fails fast, before the slow raster reads.
         drought_by_id = resilience.parse_drought(drought)
-        results, eudr_summary, provenance, _ = await _assess_collection(plots)
+        results, eudr_summary, provenance, drawn = await _assess_collection(plots)
         rows = resilience.build_rows(results, drought_by_id)
+        status_by_id = {row["id"]: row["supply_status"] for row in rows}
+        summary = resilience.summarise(rows)
+        counts = summary["by_supply_status"]
+        heading = (
+            f"Supply status: {counts[resilience.STATUS_BLOCKED]} blocked, "
+            f"{counts[resilience.STATUS_REVIEW]} review, {counts[resilience.STATUS_AT_RISK]} at risk, "
+            f"{counts[resilience.STATUS_SECURE]} secure"
+        )
+        png, extent = await _render_overview(
+            [(ref, geom, status_by_id[ref]) for ref, geom, _ in drawn],
+            heading,
+            overview.MapClasses(colours=resilience.STATUS_COLOURS, legend=resilience.STATUS_LEGEND),
+        )
         # Drought ids that match no plot usually mean a typo; report them so the agent can fix it.
         unmatched = sorted(set(drought_by_id) - {row["id"] for row in rows})
         payload = {
             "matrix_markdown": resilience.markdown_table(rows),
             "rows": rows,
-            "summary": {**resilience.summarise(rows), "eudr": eudr_summary},
+            "summary": {**summary, "eudr": eudr_summary},
+            "map": {"bounds": [round(v, 5) for v in extent], "bytes": len(png)},
             "provenance": {
                 **provenance,
                 "drought_risk_from": "passed in by the caller (e.g. climate_risk drought_index, ERA5)",
                 "unmatched_drought_ids": unmatched,
             },
         }
-        return json.dumps(payload)
+        return [Image(data=png, format="png"), json.dumps(payload)]
     except Exception as exc:  # noqa: BLE001
-        return _error(str(exc))
+        return [_error(str(exc))]
 
 
 if __name__ == "__main__":

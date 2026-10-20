@@ -46,6 +46,22 @@ DROUGHT_ACTIONS = {
 }
 
 
+# Map colours and legend per supply status (worst first). Colour is never the
+# only cue: the legend spells out what each status means.
+STATUS_COLOURS = {
+    STATUS_BLOCKED: "#d73027",
+    STATUS_REVIEW: "#fee08b",
+    STATUS_AT_RISK: "#fc8d59",
+    STATUS_SECURE: "#2c7bb6",  # blue, not green: the map background is green forest
+}
+STATUS_LEGEND = [
+    (STATUS_BLOCKED, "blocked: forest cleared after 2020"),
+    (STATUS_REVIEW, "review: small forest loss, verify first"),
+    (STATUS_AT_RISK, "at risk: legal, but drought"),
+    (STATUS_SECURE, "secure"),
+]
+
+
 def drought_level(value: Any) -> str:
     """Drought risk level from what the agent passed for one plot.
 

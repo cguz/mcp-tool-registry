@@ -57,3 +57,16 @@ def test_figure_size_follows_ground_aspect():
     assert wide[0] == square[0] == 8.0
     assert wide[1] < square[1]
     assert 3.8 <= wide[1] <= 9.0
+
+
+def test_overview_png_with_custom_classes():
+    """The decision map colours plots by supply status instead of EUDR risk."""
+    classes = overview.MapClasses(
+        colours={"blocked": "#d73027", "secure": "#1a9850"},
+        legend=[("blocked", "blocked"), ("secure", "secure")],
+    )
+    plots = [("farm-01", SQUARE, "blocked"), ("farm-02", forest.to_plot_geometry(latitude=0.02, longitude=0.02)[0], "secure")]
+    bounds = overview.map_bounds([g for _, g, _ in plots])
+    fraction = np.zeros((50, 50), dtype=np.float32)
+    png = overview.overview_png(plots, fraction, bounds, "Supply status", "footer", classes)
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import math
+from dataclasses import dataclass
 
 import forest
 import matplotlib
@@ -37,6 +38,26 @@ RISK_COLOURS = {"low": "#1a9850", "medium": "#fdae61", "high": "#d73027"}
 # Background ramp for forest fraction 0..1: beige (no forest) to dark green.
 FOREST_CMAP = LinearSegmentedColormap.from_list("forest", ["#f2efe6", "#2e7d32"])
 MIN_SPAN_DEG = 0.04  # ~4.5 km, so a single farm still shows its surroundings
+
+
+@dataclass(frozen=True)
+class MapClasses:
+    """How plots are coloured on an overview map.
+
+    Attributes:
+        colours: Class key -> marker and outline colour.
+        legend: (class key, legend text) in legend order; the plot count is appended.
+    """
+
+    colours: dict[str, str]
+    legend: list[tuple[str, str]]
+
+
+# The default map: plots coloured by EUDR risk level.
+EUDR_CLASSES = MapClasses(
+    colours=RISK_COLOURS,
+    legend=[("high", "high EUDR risk"), ("medium", "medium EUDR risk"), ("low", "low EUDR risk")],
+)
 
 
 def map_bounds(geoms: list[dict], pad_fraction: float = 0.12) -> tuple[float, float, float, float]:
@@ -70,15 +91,19 @@ def overview_png(
     bounds: tuple[float, float, float, float],
     title: str,
     footer: str,
+    classes: MapClasses = EUDR_CLASSES,
 ) -> bytes:
-    """Render the overview map: plots coloured by EUDR risk over the GFC2020 forest fraction.
+    """Render the overview map: plots coloured by class over the GFC2020 forest fraction.
 
     Args:
-        plots: (label, geometry, risk_level) per assessed plot.
+        plots: (label, geometry, class key) per assessed plot; by default the
+            class is the EUDR risk level.
         forest_fraction: Background array from ``sources.forest_background``.
         bounds: (west, south, east, north) extent of ``forest_fraction``.
         title: Map title (top left).
         footer: Small source/disclaimer line at the bottom.
+        classes: Colours and legend of the plot classes (EUDR risk by default;
+            the supply-status map passes its own).
 
     Returns:
         A compact palette PNG (see ``compact_png``).
@@ -93,8 +118,8 @@ def overview_png(
     ax.set_aspect(1 / max(math.cos(math.radians(mid_lat)), 1e-6))
 
     markers = []
-    for plot_ref, geom, risk in plots:
-        colour = RISK_COLOURS[risk]
+    for plot_ref, geom, key in plots:
+        colour = classes.colours[key]
         for ring in _rings(geom):
             ax.add_patch(PolygonPatch(ring, closed=True, facecolor=colour, edgecolor="black",
                                       linewidth=0.8, alpha=0.75, zorder=2))
@@ -112,11 +137,11 @@ def overview_png(
     ax.tick_params(labelsize=7)
     ax.set_title(title, fontsize=10, loc="left")
 
-    counts = {risk: sum(1 for _, _, r in plots if r == risk) for risk in RISK_COLOURS}
+    counts = {key: sum(1 for _, _, k in plots if k == key) for key in classes.colours}
     handles = [
-        Line2D([], [], marker="o", linestyle="", markersize=8, markerfacecolor=RISK_COLOURS[r],
-               markeredgecolor="black", label=f"{r} EUDR risk ({counts[r]})")
-        for r in ("high", "medium", "low")
+        Line2D([], [], marker="o", linestyle="", markersize=8, markerfacecolor=classes.colours[key],
+               markeredgecolor="black", label=f"{text} ({counts[key]})")
+        for key, text in classes.legend
     ]
     handles.append(Patch(facecolor="#2e7d32", label="forest on 31 Dec 2020 (JRC GFC2020)"))
     ax.legend(handles=handles, fontsize=7, loc="lower left", framealpha=0.9)
