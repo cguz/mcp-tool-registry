@@ -96,7 +96,7 @@ uv venv -p 3.13 .venv
 uv pip install -r servers/climate_risk/requirements.txt pytest ruff
 
 cd servers/climate_risk
-../../.venv/bin/python -m pytest -q                          # offline: 37 tests
+../../.venv/bin/python -m pytest -q                          # offline tests, no network
 ../../.venv/bin/python server.py --port 8101                 # terminal 1
 ../../.venv/bin/python test.py http://localhost:8101/mcp     # terminal 2, live
 ```
