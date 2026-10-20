@@ -114,7 +114,7 @@ uv venv -p 3.13 .venv
 uv pip install -r servers/forest_compliance/requirements.txt pytest ruff
 
 cd servers/forest_compliance
-../../.venv/bin/python -m pytest -q                          # offline: 34 tests
+../../.venv/bin/python -m pytest -q                          # offline tests, no network
 ../../.venv/bin/python server.py --port 8102                 # terminal 1
 ../../.venv/bin/python test.py http://localhost:8102/mcp     # terminal 2, live (~10 s)
 ```
