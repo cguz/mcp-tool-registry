@@ -18,6 +18,7 @@ slopes. All data are free and need no API key.
 | Land cover | ESA WorldCover 2021 v200 (AWS Open Data) | what burned; built-up land near the scar |
 | Rain | Open-Meteo forecast and historical-forecast APIs | 15-minute and hourly precipitation |
 | Hazard | USGS M1 model, Staley et al. (2017) | debris-flow likelihood and the 50 % rainfall threshold |
+| Places | OpenStreetMap via Nominatim reverse geocoding | names of the main built-up areas, flagged when in the danger zone |
 
 ## Tools
 
@@ -25,7 +26,8 @@ slopes. All data are free and need no API key.
 |---|---|---|
 | `burn_severity` | `fire_start` (YYYY-MM-DD), optional `fire_end` (containment, in the past; default `fire_start` + 14 days, capped at yesterday); the area as `geometry` (GeoJSON polygon, e.g. the fire perimeter), `bbox` [W, S, E, N] or `latitude` + `longitude` (+ `radius_km`, default 5) | burned ha, ha per severity class, mean dNBR, share of moderate/high burn on steep slopes, burned land cover, built-up land burned and within 2 km, scenes used, provenance |
 | `postfire_flood_risk` | as `burn_severity`, plus `rain_start` / `rain_end` (default: today and the next 7 days, forecast) and optional `soil_kf` | `verdict` sentence, `risk_level` (low / medium / high), `likelihood`, threshold and peak rain for 15, 30 and 60 min, rain bursts above the threshold, burn summary, provenance |
-| `cascade_figure` | as `postfire_flood_risk`, plus optional `title` | PNG (~45-70 KB): severity map over terrain with built-up land, and the rain bars against the threshold line; then a JSON block with verdict and provenance |
+| `cascade_figure` | as `postfire_flood_risk`, plus optional `title` | PNG (~40-60 KB): a **danger-zone map** (burn severity over terrain, the 2 km zone around steep, badly burned slopes, built-up land inside and outside it, named towns, longitude/latitude axes) and the rain bars against the threshold line; then a JSON block with verdict, places at risk and provenance |
+| `burn_scar_photos` | as `burn_severity`, plus optional `title` | JPEG (~80-110 KB): **natural-colour Sentinel-2 photos before and after the fire**, side by side, with the area outlined and towns named; then a JSON block with the photo dates, places and provenance |
 
 The area is limited to 2,500 km² (larger areas are read on a coarser grid
 above ~1,000 km²). The rain window is at most 31 days and reaches at most
@@ -49,7 +51,13 @@ chat artifacts and keeps the bytes out of the LLM context.
    large areas) covering the area plus a 2 km margin, with GDAL WarpedVRTs
    over HTTP range requests, so only the needed blocks are downloaded.
    Reflectance uses each asset's STAC `scale` / `offset` (products since 2022
-   carry a −0.1 offset).
+   carry a −0.1 offset), but the offset is applied only if the pixels still
+   contain it: Element 84 reprocessed many scenes with the offset already
+   removed, and older catalogue records do not always say so. A scene flagged
+   `earthsearch:boa_offset_applied` is trusted; otherwise a small read of the
+   blue band decides (with the offset still in, almost no land pixel is below
+   1000). Applying it twice turns dark surfaces negative and biases the burn
+   ratio.
 3. **Burn severity.** NBR = (B08 − B12) / (B08 + B12); dNBR × 1000 classified
    as low (100–269), moderate-low (270–439), moderate-high (440–659) and high
    (≥ 660) (Key & Benson 2006). The burn footprint keeps burned pixels whose
@@ -66,6 +74,11 @@ chat artifacts and keeps the bytes out of the LLM context.
    highest likelihood. Risk level: high ≥ 50 %, medium ≥ 20 %, else low.
 5. **Exposure.** WorldCover built-up land within 2 km of moderate/high burn on
    steep slopes (outside the scar itself) counts as exposed.
+6. **Places.** The map is cut into 500 m blocks; the blocks with most built-up
+   land, those in the danger zone first, are picked at least 3 km apart (up to
+   8) and named by reverse geocoding at village level (Nominatim, one request
+   per second). Names are a reading aid: without network access to Nominatim
+   the analysis still runs, just without labels.
 
 Coefficients (b0, b1, b2, b3): 15 min −3.63, 0.41, 0.67, 0.70; 30 min −3.61,
 0.26, 0.39, 0.50; 60 min −3.21, 0.17, 0.20, 0.22.
@@ -77,9 +90,10 @@ flows in the Eaton and Palisades burn areas:
 
 | Check | Result |
 |---|---|
-| Burned area in the bbox [-118.17, 34.17, -118.02, 34.27] | ~6,000 ha (official perimeter: ~5,700 ha) |
-| 50 % threshold | ~3.8 mm in 15 min (~15 mm/h) |
-| Peak rain, 14 Feb 2025 01:15–01:30 UTC | 12.4 mm in 15 min → likelihood ~100 %, **high** |
+| Burned area in the bbox [-118.17, 34.17, -118.02, 34.27] | ~5,500 ha (official perimeter: ~5,700 ha) |
+| 50 % threshold | ~5.3 mm in 15 min (~21 mm/h) |
+| Peak rain, 14 Feb 2025 01:15–01:30 UTC | 12.4 mm in 15 min → likelihood ~99 %, **high** |
+| Places in the danger zone | Pasadena, La Cañada Flintridge, Arcadia, Altadena, Mount Wilson |
 | Dry week, 1–7 July 2025 | likelihood ~4 %, **low** |
 
 ## Chaining with the EFFIS server
@@ -97,22 +111,22 @@ wildfire in north-east Spain in August 2026" → EFFIS → Peñas de Riglos
 
 | Check | Result |
 |---|---|
-| Burned area (cropland excluded) | ~15,200 ha; ~12,000 ha high severity |
-| Rain 27 Sep–8 Oct 2026 | peak 5.4 mm in 15 min on 2 Oct vs a 3.4 mm threshold → likelihood ~90 %, **high** (three bursts above it) |
-| Forecast for the next 7 days (from 14 Oct 2026) | peak 0.5 mm in 15 min → **low** |
+| Burned area (cropland excluded) | ~18,300 ha (EFFIS: 18,244 ha); ~8,400 ha high severity |
+| Rain 27 Sep–8 Oct 2026 | peak 5.4 mm in 15 min on 2 Oct vs a 5.5 mm threshold → likelihood ~48 %, **medium**, just below the line |
+| Places in the danger zone | Santa Cilia, Bailo, Puente la Reina de Jaca, Peñas de Riglos, Santa Cruz de la Serós |
 
 ## Files
 
 | File | Contents |
 |---|---|
-| `server.py` | FastMCP, the three tools, the burn-analysis cache and provenance |
+| `server.py` | FastMCP, the four tools, the burn-analysis cache and provenance |
 | `aoi.py` | Area input (GeoJSON, bbox, point + radius), geodesic area, fingerprint, tile coverage |
-| `burn.py` | NumPy maths: reflectance, NBR, dNBR, severity, slope, hillshade, despeckling, statistics |
+| `burn.py` | NumPy maths: reflectance, natural colour, NBR, dNBR, severity, slope, hillshade, despeckling, danger zone, settlement blocks, statistics |
 | `hazard.py` | USGS M1 model, thresholds, rain peaks and bursts |
-| `sources.py` | All network I/O: STAC search, scene choice, warped COG reads, Open-Meteo |
-| `figure.py` | Two-panel cascade figure (matplotlib, headless), palette PNG |
-| `test_aoi.py`, `test_burn.py`, `test_hazard.py` | Offline tests (pytest), no network, no LLM |
-| `test.py` | Live test over MCP/HTTP on the Eaton fire (no LLM); writes `cascade.png` |
+| `sources.py` | All network I/O: STAC search, scene choice, warped COG reads, photos, offset rule, place names, Open-Meteo |
+| `figure.py` | Danger-zone + rain figure (palette PNG) and before/after photos (JPEG), matplotlib headless |
+| `test_aoi.py`, `test_burn.py`, `test_hazard.py`, `test_sources.py` | Offline tests (pytest), no network, no LLM |
+| `test.py` | Live test over MCP/HTTP on the Eaton fire (no LLM); writes `cascade.png` and `before_after.jpg` |
 
 ## Run and test
 
@@ -121,12 +135,13 @@ From `mcp-tool-registry/`:
 ```bash
 pip install -r servers/wildfire_flood/requirements.txt
 cd servers/wildfire_flood
-python -m pytest -q test_aoi.py test_burn.py test_hazard.py   # offline, < 1 s
+python -m pytest -q test_aoi.py test_burn.py test_hazard.py test_sources.py   # offline, < 1 s
 python server.py --port 8103 &                                 # HTTP on :8103/mcp
 python test.py http://localhost:8103/mcp                       # live, ~1 min the first time
 ```
 
-The first call for a fire downloads the scenes (~20-60 s); later calls on the
+The first call for a fire downloads the scenes and names the places
+(~1-2 min); later calls on the
 same fire and area reuse an in-memory cache and take well under a second.
 
 Register in a local EVE: `POST /mcp-servers` with
@@ -153,3 +168,5 @@ Register in a local EVE: `POST /mcp-servers` with
   scattered low-severity pixels. Passing the fire perimeter as `geometry`
   gives the cleanest statistics.
 - Open-Meteo's free API is for non-commercial use.
+- Place names come from Nominatim's public service (one request per second,
+  attribution required); a busy deployment should use its own instance.

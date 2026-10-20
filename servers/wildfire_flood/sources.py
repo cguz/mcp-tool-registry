@@ -8,6 +8,7 @@ Every source is public and needs no API key:
     * Copernicus DEM GLO-30 (1° COG tiles on AWS)
     * ESA WorldCover 2021 v200 (3° COG tiles on AWS)
     * Open-Meteo forecast and historical-forecast APIs (15-minute and hourly rain)
+    * OpenStreetMap place names via Nominatim reverse geocoding
 
 All rasters are warped onto one analysis grid (see Grid) with GDAL WarpedVRTs,
 so only the blocks around the area of interest are downloaded. Functions here
@@ -17,6 +18,7 @@ block on network I/O; the server calls them from a worker thread.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
@@ -30,7 +32,8 @@ from rasterio.errors import RasterioIOError
 from rasterio.features import geometry_mask
 from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
-from rasterio.warp import transform_bounds, transform_geom
+from rasterio.warp import transform, transform_bounds, transform_geom
+from rasterio.windows import from_bounds
 
 STAC_SEARCH_URL = "https://earth-search.aws.element84.com/v1/search"
 S2_COLLECTION = "sentinel-2-l2a"
@@ -43,6 +46,10 @@ WORLDCOVER_URL = (
 )
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+NOMINATIM_MIN_INTERVAL_S = 1.1  # Nominatim usage policy: at most one request per second
+PLACE_ADDRESS_KEYS = ("village", "town", "city", "hamlet", "suburb", "municipality")
+DISPLAY_MAX_PX = 520  # longest side of the before/after photos
 
 BASE_PIXEL_M = 20  # Sentinel-2 B12 and SCL resolution
 MAX_PIXELS = 2_500_000  # per raster; larger areas use a coarser multiple of 20 m
@@ -87,6 +94,12 @@ DATASETS = {
         "url": WORLDCOVER_URL.format(tile="<tile>"),
         "licence": "CC BY 4.0",
     },
+    "places": {
+        "name": "OpenStreetMap place names (reverse geocoding of built-up clusters)",
+        "provider": "OpenStreetMap contributors, via Nominatim",
+        "url": NOMINATIM_REVERSE_URL,
+        "licence": "ODbL 1.0",
+    },
     "rain": {
         "name": "Open-Meteo forecast / historical-forecast API (weather-model precipitation)",
         "provider": "Open-Meteo.com (national weather services' models)",
@@ -115,6 +128,18 @@ class Grid:
         """(rows, columns), the NumPy order."""
         return self.height, self.width
 
+    def coarsened(self, max_px: int) -> Grid:
+        """The same extent on a coarser grid whose longest side is at most max_px,
+        for pictures that do not need full resolution."""
+        factor = max(1, math.ceil(max(self.width, self.height) / max_px))
+        return Grid(
+            self.crs,
+            self.transform @ rasterio.Affine.scale(factor),
+            math.ceil(self.width / factor),
+            math.ceil(self.height / factor),
+            self.pixel_m * factor,
+        )
+
     def bounds_lonlat(self) -> tuple[float, float, float, float]:
         """Grid extent as (west, south, east, north) in degrees, to pick DEM and WorldCover tiles."""
         west, north = self.transform * (0, 0)
@@ -136,6 +161,13 @@ class BurnScene:
     scenes: dict[str, dict]
     tile: str
     sources: dict[str, list[str]] = field(default_factory=dict)
+    # Natural-colour photos before and after the fire, on a coarser display grid.
+    display_grid: Grid | None = None
+    photo_pre: np.ndarray | None = None
+    photo_post: np.ndarray | None = None
+    # Named built-up places around the scar (see name_places), each flagged when it lies
+    # within the danger zone of steep, badly burned slopes.
+    places: list[dict] = field(default_factory=list)
 
 
 # --- Sentinel-2 scene search -------------------------------------------------
@@ -267,6 +299,49 @@ def worldcover_urls(bounds: tuple[float, float, float, float]) -> list[str]:
     return urls
 
 
+# Sentinel-2 L2A digital numbers carry +1000 from processing baseline 04.00 on.
+BOA_ADD_OFFSET_DN = 1000
+# With that offset still in the pixels, almost no blue-band value is below 1000
+# (it would mean negative reflectance); once removed, most land pixels are.
+OFFSET_REMOVED_MIN_SHARE = 0.2
+_offset_removed_cache: dict[str, bool] = {}
+
+
+def _offset_already_removed(item: dict) -> bool:
+    """Whether a scene's pixels already have the +1000 offset taken out.
+
+    Element 84 reprocessed many scenes with the offset removed; some say so with
+    ``earthsearch:boa_offset_applied: true``, but older catalogue records still
+    say false for files that were rewritten. So the flag is trusted when true,
+    and otherwise the data decide: a small overview read of the blue band (the
+    darkest one) shows whether many land pixels sit below 1000. Cached per scene.
+    """
+    if item["properties"].get("earthsearch:boa_offset_applied"):
+        return True
+    if item["id"] not in _offset_removed_cache:
+        with rasterio.open("/vsicurl/" + item["assets"]["blue"]["href"]) as src:
+            sample = src.read(1, out_shape=(256, 256))  # served from a COG overview
+        valid = sample[sample > 0]
+        share_below = float((valid < BOA_ADD_OFFSET_DN).mean()) if valid.size else 0.0
+        _offset_removed_cache[item["id"]] = share_below >= OFFSET_REMOVED_MIN_SHARE
+    return _offset_removed_cache[item["id"]]
+
+
+def _scale_offset(item: dict, asset: str) -> tuple[float, float]:
+    """Scale and offset turning an asset's digital numbers into reflectance.
+
+    The STAC raster:bands give offset -0.1 for products from 2022 on, but the
+    offset must not be applied twice: when the pixels already have it removed
+    (see _offset_already_removed), dark surfaces would turn negative and the
+    burn ratio would be biased.
+    """
+    band = (item["assets"][asset].get("raster:bands") or [{}])[0]
+    offset = band.get("offset", 0.0)
+    if offset and _offset_already_removed(item):
+        offset = 0.0
+    return band.get("scale", 0.0001), offset
+
+
 def _band(item: dict, asset: str, grid: Grid, resampling: Resampling) -> np.ndarray:
     """One Sentinel-2 band on the grid, as reflectance (or raw codes for SCL)."""
     meta = item["assets"][asset]
@@ -275,8 +350,7 @@ def _band(item: dict, asset: str, grid: Grid, resampling: Resampling) -> np.ndar
         raise ValueError(f"could not read {asset} of scene {item['id']}")
     if asset == "scl":
         return raw
-    band = (meta.get("raster:bands") or [{}])[0]
-    return burn.reflectance(raw, band.get("scale", 0.0001), band.get("offset", 0.0))
+    return burn.reflectance(raw, *_scale_offset(item, asset))
 
 
 def _best_nbr(items: list[dict], grid: Grid, inside: np.ndarray) -> tuple[dict, np.ndarray, float]:
@@ -314,6 +388,68 @@ def _scene_info(item: dict, usable_share: float) -> dict:
         "aoi_usable_share": round(usable_share, 3),
         "processing_baseline": props.get("s2:processing_baseline"),
     }
+
+
+def _display_band(item: dict, asset: str, grid: Grid) -> np.ndarray:
+    """One band as reflectance on a display grid in the scene's own CRS.
+
+    No reprojection is needed (the display grid is a coarsened analysis grid,
+    which uses the tile's UTM zone), so a plain windowed read with out_shape
+    lets GDAL pick the COG overview level: a few small range requests instead
+    of warping the full 10 m band.
+    """
+    meta = item["assets"][asset]
+    left, top = grid.transform * (0, 0)
+    right, bottom = grid.transform * (grid.width, grid.height)
+    with rasterio.open("/vsicurl/" + meta["href"]) as src:
+        window = from_bounds(left, bottom, right, top, transform=src.transform)
+        raw = src.read(1, window=window, out_shape=grid.shape, resampling=Resampling.average,
+                       boundless=True, fill_value=0)
+    return burn.reflectance(raw, *_scale_offset(item, asset))
+
+
+def _photo(item: dict, grid: Grid) -> np.ndarray:
+    """Natural-colour picture of a scene (bands B04, B03, B02) on a display grid."""
+    return burn.true_colour(*(_display_band(item, asset, grid) for asset in ("red", "green", "blue")))
+
+
+def name_places(cells: list[dict], grid: Grid) -> list[dict]:
+    """Name built-up clusters (see burn.settlement_cells) with OpenStreetMap.
+
+    Each cluster centre is reverse-geocoded at village level; clusters without a
+    settlement name, and repeated names, are dropped. Requests are spaced to
+    respect Nominatim's one-per-second policy. Network errors end the lookup
+    early: names are a reading aid, so the caller carries on with what it has.
+
+    Returns:
+        [{"name", "kind", "lon", "lat", "x", "y", "built_up_ha", "near_steep_burn"}]
+    """
+    places: list[dict] = []
+    seen: set[str] = set()
+    for i, cell in enumerate(cells):
+        x, y = grid.transform * (cell["col"] + 0.5, cell["row"] + 0.5)
+        lons, lats = transform(grid.crs, "EPSG:4326", [x], [y])
+        if i:
+            time.sleep(NOMINATIM_MIN_INTERVAL_S)
+        try:
+            response = httpx.get(
+                NOMINATIM_REVERSE_URL,
+                params={"format": "jsonv2", "lat": round(lats[0], 5), "lon": round(lons[0], 5), "zoom": 14,
+                        "addressdetails": 1},
+                headers={"User-Agent": "eve-mcp-wildfire-flood/0.1 (EVE hackathon MCP server)"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            address = response.json().get("address", {})
+        except (httpx.HTTPError, ValueError):
+            break
+        kind = next((key for key in PLACE_ADDRESS_KEYS if key in address), None)
+        if kind and address[kind] not in seen:
+            seen.add(address[kind])
+            places.append({"name": address[kind], "kind": kind, "lon": round(lons[0], 5), "lat": round(lats[0], 5),
+                           "x": x, "y": y, "built_up_ha": cell["built_up_ha"],
+                           "near_steep_burn": cell["near_steep_burn"]})
+    return places
 
 
 def analyse_burn(geom: dict, fire_start: date, fire_end: date, margin_km: float = 2.0) -> BurnScene:
@@ -354,8 +490,13 @@ def analyse_burn(geom: dict, fire_start: date, fire_end: date, margin_km: float 
         dem[dem == -32768.0] = 0.0  # missing tiles are open sea
         land_cover, wc_used = _mosaic(worldcover_urls(lonlat), grid, Resampling.mode, 0, "uint8")
 
+        display = grid.coarsened(DISPLAY_MAX_PX)
+        photo_pre, photo_post = _photo(pre_item, display), _photo(post_item, display)
+
     slope = burn.slope_degrees(dem, grid.pixel_m)
     stats = burn.burn_stats(dnbr, slope, land_cover, inside, grid.pixel_m, near_km=margin_km)
+    masks = burn.danger_masks(dnbr, slope, land_cover, inside, grid.pixel_m, margin_km)
+    places = name_places(burn.settlement_cells(land_cover, masks.near_zone, grid.pixel_m), grid)
     return BurnScene(
         grid=grid,
         inside=inside,
@@ -367,6 +508,10 @@ def analyse_burn(geom: dict, fire_start: date, fire_end: date, margin_km: float 
         scenes={"pre_fire": _scene_info(pre_item, pre_share), "post_fire": _scene_info(post_item, post_share)},
         tile=tile,
         sources={"dem_tiles": dem_used, "worldcover_tiles": wc_used},
+        display_grid=display,
+        photo_pre=photo_pre,
+        photo_post=photo_post,
+        places=places,
     )
 
 

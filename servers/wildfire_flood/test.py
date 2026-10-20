@@ -1,7 +1,7 @@
 """Live smoke test for the Wildfire Flood server over MCP (needs internet, no LLM).
 
 Start the server first (python server.py), then run: python test.py [url]
-The figure is written to cascade.png in the current directory.
+The figures are written to cascade.png and before_after.jpg in the current directory.
 
 Unlike the test_*.py files this is not a pytest module: it calls the running
 server over streamable HTTP with the real data. The reference case is the
@@ -43,13 +43,15 @@ async def main() -> None:
             await session.initialize()
             names = {t.name for t in (await session.list_tools()).tools}
             print("Tools:", sorted(names))
-            assert names == {"burn_severity", "postfire_flood_risk", "cascade_figure"}
+            assert names == {"burn_severity", "postfire_flood_risk", "cascade_figure", "burn_scar_photos"}
 
             burn = (await call(session, "burn_severity", EATON))["burn"]
             print(f"Eaton: {burn['burned_ha']:,.0f} ha burned, severity {burn['severity_ha']}, "
                   f"steep mod/high share {burn['steep_mod_high_share']}")
             assert 4_500 < burn["burned_ha"] < 7_500  # official perimeter: ~5,700 ha
-            assert burn["severity_ha"]["high"] > burn["severity_ha"]["low"]
+            severe = burn["severity_ha"]["moderate-high"] + burn["severity_ha"]["high"]
+            assert severe > burn["severity_ha"]["low"]
+            assert "Altadena" in {p["name"] for p in burn["places"]} or not burn["places"]  # names need Nominatim
             assert burn["built_up_burned_ha"] > 300  # Altadena
 
             storm = await call(session, "postfire_flood_risk", {**EATON, **STORM})
@@ -75,6 +77,14 @@ async def main() -> None:
                 f.write(png)
             print(f"Figure: cascade.png ({len(png) // 1024} KB, {time.monotonic() - started:.1f}s)")
             assert len(png) < 120_000
+            started = time.monotonic()
+            result = await session.call_tool("burn_scar_photos", {**EATON, "title": "Eaton fire, January 2025"})
+            image = next(c for c in result.content if c.type == "image")
+            jpeg = base64.b64decode(image.data)
+            with open("before_after.jpg", "wb") as f:
+                f.write(jpeg)
+            print(f"Photos: before_after.jpg ({len(jpeg) // 1024} KB, {image.mimeType}, {time.monotonic() - started:.1f}s)")
+            assert image.mimeType == "image/jpeg" and len(jpeg) < 200_000
             print("OK")
 
 

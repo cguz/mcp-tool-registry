@@ -163,6 +163,90 @@ def scar_mask(dnbr_x1000: np.ndarray, land_cover: np.ndarray) -> np.ndarray:
     return burn_footprint(dnbr_x1000) & (land_cover != CROPLAND)
 
 
+def true_colour(red: np.ndarray, green: np.ndarray, blue: np.ndarray, white: float = 0.3) -> np.ndarray:
+    """Natural-colour image (rows, cols, 3) uint8 from surface reflectance.
+
+    Land reflectance rarely exceeds ~0.3 in the visible bands, so that value is
+    mapped to white; a gamma of 1/1.8 lifts the dark vegetation and burn scars
+    so they look as the eye would see them. No-data pixels become black.
+    """
+    stack = np.dstack([red, green, blue])
+    scaled = np.clip(np.nan_to_num(stack, nan=0.0) / white, 0, 1) ** (1 / 1.8)
+    return (scaled * 255).astype("uint8")
+
+
+@dataclass
+class DangerMasks:
+    """Where a post-fire debris flow would start and whom it could reach."""
+
+    burned: np.ndarray  # the burn scar inside the AOI with a valid dNBR
+    steep_mod_high: np.ndarray  # moderate/high burn on slopes >= 23°: where debris flows start
+    near_zone: np.ndarray  # within near_km of those slopes
+    exposed_built_up: np.ndarray  # built-up land in the near zone, outside the scar
+
+
+def danger_masks(
+    dnbr_x1000: np.ndarray,
+    slope_deg: np.ndarray,
+    land_cover: np.ndarray,
+    inside: np.ndarray,
+    pixel_m: float,
+    near_km: float = 2.0,
+) -> DangerMasks:
+    """The masks behind the burn statistics and the danger-zone map.
+
+    The near zone is a plain distance buffer, a screening simplification: it
+    does not follow flow paths, so it also covers land uphill of the scar.
+    """
+    valid = inside & np.isfinite(dnbr_x1000)
+    burned = valid & scar_mask(dnbr_x1000, land_cover)
+    steep_mod_high = burned & (dnbr_x1000 >= MOD_HIGH_MIN_DNBR) & (slope_deg >= STEEP_SLOPE_DEG)
+    near_zone = dilate(steep_mod_high, round(near_km * 1000 / pixel_m))
+    exposed = near_zone & (land_cover == BUILT_UP) & ~burned
+    return DangerMasks(burned, steep_mod_high, near_zone, exposed)
+
+
+def settlement_cells(
+    land_cover: np.ndarray,
+    near_zone: np.ndarray,
+    pixel_m: float,
+    cell_m: float = 500.0,
+    max_cells: int = 8,
+    min_separation_m: float = 3000.0,
+) -> list[dict]:
+    """Centres of the main built-up clusters, exposed ones first.
+
+    The grid is cut into cell_m blocks; blocks are ranked by whether they hold
+    built-up land in the near zone, then by how much built-up land they hold,
+    and picked greedily at least min_separation_m apart (one label per village
+    rather than one per street). Pure NumPy, no flood fill.
+
+    Returns:
+        [{"row", "col", "built_up_ha", "near_steep_burn"}] with row/col the
+        block centre on the analysis grid.
+    """
+    block = max(1, round(cell_m / pixel_m))
+    rows, cols = land_cover.shape[0] // block, land_cover.shape[1] // block
+    if rows == 0 or cols == 0:
+        return []
+    trim = (slice(0, rows * block), slice(0, cols * block))
+    built = (land_cover[trim] == BUILT_UP).reshape(rows, block, cols, block).sum(axis=(1, 3))
+    exposed = ((land_cover[trim] == BUILT_UP) & near_zone[trim]).reshape(rows, block, cols, block).sum(axis=(1, 3))
+    min_px = max(1, block * block // 20)  # at least 5 % built-up
+    candidates = [(bool(exposed[r, c]), int(built[r, c]), r, c)
+                  for r in range(rows) for c in range(cols) if built[r, c] >= min_px]
+    candidates.sort(reverse=True)
+    picked: list[dict] = []
+    min_sep_blocks = min_separation_m / (block * pixel_m)
+    for is_exposed, count, r, c in candidates:
+        if all((r - p["_r"]) ** 2 + (c - p["_c"]) ** 2 >= min_sep_blocks**2 for p in picked):
+            picked.append({"_r": r, "_c": c, "row": r * block + block // 2, "col": c * block + block // 2,
+                           "built_up_ha": round(count * pixel_m * pixel_m / 10_000, 1), "near_steep_burn": is_exposed})
+        if len(picked) == max_cells:
+            break
+    return [{k: v for k, v in p.items() if not k.startswith("_")} for p in picked]
+
+
 @dataclass
 class BurnStats:
     """Area statistics of a burn scar inside the AOI."""
@@ -203,15 +287,11 @@ def burn_stats(
     pixel_ha = pixel_m * pixel_m / 10_000
     valid = inside & np.isfinite(dnbr_x1000)
     footprint = burn_footprint(dnbr_x1000)
-    scar = footprint & (land_cover != CROPLAND)
-    classes = severity(np.where(valid & scar, dnbr_x1000, np.nan))
-    burned = valid & scar
+    masks = danger_masks(dnbr_x1000, slope_deg, land_cover, inside, pixel_m, near_km)
+    burned, steep_mod_high = masks.burned, masks.steep_mod_high
+    classes = severity(np.where(burned, dnbr_x1000, np.nan))
     mod_high = burned & (dnbr_x1000 >= MOD_HIGH_MIN_DNBR)
-    steep = slope_deg >= STEEP_SLOPE_DEG
-    steep_mod_high = mod_high & steep
     burned_px = int(burned.sum())
-
-    source = dilate(steep_mod_high, round(near_km * 1000 / pixel_m))
     built_up = land_cover == BUILT_UP
 
     land_cover_burned = {}
@@ -237,6 +317,6 @@ def burn_stats(
         land_cover_burned_ha=land_cover_burned,
         built_up_burned_ha=round(float((burned & built_up).sum()) * pixel_ha, 1),
         cropland_change_ha=round(float((valid & footprint & (land_cover == CROPLAND)).sum()) * pixel_ha, 1),
-        built_up_near_ha=round(float((source & built_up & ~burned).sum()) * pixel_ha, 1),
+        built_up_near_ha=round(float(masks.exposed_built_up.sum()) * pixel_ha, 1),
         near_km=near_km,
     )

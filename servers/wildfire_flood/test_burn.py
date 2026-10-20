@@ -85,3 +85,40 @@ def test_cropland_is_left_out_of_the_scar():
     assert stats.burned_ha == pytest.approx(200 * 0.04, rel=0.05)
     assert stats.cropland_change_ha == pytest.approx(200 * 0.04, rel=0.05)
     assert not burn.scar_mask(dnbr, land)[:, 10:].any()
+
+
+def test_true_colour_stretch():
+    """Reflectance 0.3 is white, 0 and no data are black, mid values are lifted by the gamma."""
+    red = np.array([[0.0, 0.3, np.nan, 0.15]])
+    rgb = burn.true_colour(red, red, red)
+    assert rgb.dtype == np.uint8 and rgb.shape == (1, 4, 3)
+    assert rgb[0, 0, 0] == 0 and rgb[0, 1, 0] == 255 and rgb[0, 2, 0] == 0
+    assert rgb[0, 3, 0] > 128  # gamma brightens the mid-tones
+
+
+def test_danger_masks_zone_and_exposed_built_up():
+    """Steep, badly burned slopes define a zone; only built-up land inside it and off the scar is exposed."""
+    shape = (60, 60)
+    dnbr = np.zeros(shape)
+    dnbr[10:30, 10:30] = 700
+    slope = np.full(shape, 30, dtype="float32")
+    land = np.full(shape, 10, dtype="uint8")
+    land[35:40, 10:20] = burn.BUILT_UP  # 5-9 px below the scar: inside a 10 px zone
+    land[55:60, 50:60] = burn.BUILT_UP  # far away
+    masks = burn.danger_masks(dnbr, slope, land, np.ones(shape, bool), pixel_m=20, near_km=0.2)
+    assert masks.steep_mod_high[20, 20] and not masks.steep_mod_high[50, 50]
+    assert masks.near_zone[38, 15] and not masks.near_zone[57, 55]
+    assert masks.exposed_built_up.sum() == 50
+
+
+def test_settlement_cells_prefer_exposed_and_keep_apart():
+    """Clusters in the danger zone come first; neighbouring blocks collapse into one label."""
+    land = np.full((100, 100), 10, dtype="uint8")
+    land[0:25, 0:25] = burn.BUILT_UP  # big town, outside the zone
+    land[70:80, 70:80] = burn.BUILT_UP  # small village, in the zone
+    near = np.zeros((100, 100), bool)
+    near[60:100, 60:100] = True
+    cells = burn.settlement_cells(land, near, pixel_m=100, cell_m=500, min_separation_m=3000)
+    assert cells[0]["near_steep_burn"] and 70 <= cells[0]["row"] < 80
+    assert len(cells) == 2  # the 25 blocks of the big town give a single label
+    assert not cells[1]["near_steep_burn"]

@@ -12,11 +12,13 @@ The server chains three free, keyless data sources and one published model:
     2. Terrain    — slope from Copernicus DEM GLO-30; land cover from ESA WorldCover 2021
     3. Rain       — Open-Meteo 15-minute / hourly precipitation, forecast or past
     4. Hazard     — USGS M1 debris-flow likelihood model (Staley et al. 2017)
+    5. Places     — names of the main built-up areas from OpenStreetMap (Nominatim)
 
 Tools:
     burn_severity       — how big and how severe is the burn scar?
     postfire_flood_risk — will the forecast (or a past) rain trigger debris flows?
-    cascade_figure      — PNG: severity map + rain against the threshold
+    cascade_figure      — PNG: danger-zone map + rain against the threshold
+    burn_scar_photos    — JPEG: natural-colour satellite photos before and after
 
 Module layout: aoi.py (input geometry), burn.py (raster maths), hazard.py
 (the model), sources.py (all network I/O), figure.py (rendering), server.py
@@ -128,10 +130,25 @@ def _model_terms(scene: sources.BurnScene, soil_kf: float | None) -> tuple[float
 
 
 def _burn_summary(scene: sources.BurnScene) -> dict[str, Any]:
-    """Burn statistics as a JSON-ready dict."""
+    """Burn statistics as a JSON-ready dict, with the named places around the scar."""
     stats = asdict(scene.stats)
     stats["near_km"] = NEAR_KM
+    stats["places"] = [
+        {k: p[k] for k in ("name", "kind", "lat", "lon", "built_up_ha", "near_steep_burn")} for p in scene.places
+    ]
     return stats
+
+
+def _places_at_risk(scene: sources.BurnScene) -> list[str]:
+    """Names of the settlements within the danger zone, most built-up first."""
+    return [p["name"] for p in scene.places if p["near_steep_burn"]]
+
+
+def _outline(scene: sources.BurnScene, geom: dict) -> list:
+    """The analysed area's outer rings in the grid CRS, for drawing."""
+    projected = transform_geom("EPSG:4326", scene.grid.crs, geom)
+    polygons = [projected["coordinates"]] if projected["type"] == "Polygon" else projected["coordinates"]
+    return [polygon[0] for polygon in polygons]
 
 
 def _verdict(risk: dict, scene: sources.BurnScene, rain: dict) -> str:
@@ -153,7 +170,9 @@ def _verdict(risk: dict, scene: sources.BurnScene, rain: dict) -> str:
         text += f" ({entry['peak_at_utc']} UTC)"
     text += f", giving a likelihood of {risk['likelihood']:.0%}."
     if stats.built_up_near_ha > 0:
-        text += f" {stats.built_up_near_ha:,.0f} ha of built-up land lie within {NEAR_KM:g} km of steep burned slopes."
+        text += f" {stats.built_up_near_ha:,.0f} ha of built-up land lie within {NEAR_KM:g} km of steep burned slopes"
+        places = _places_at_risk(scene)
+        text += f", including {', '.join(places[:5])}." if places else "."
     return text
 
 
@@ -163,6 +182,7 @@ def _provenance(geom: dict, how: str, scene: sources.BurnScene, rain: dict | Non
         {**sources.DATASETS["sentinel2"], "scenes": scene.scenes, "mgrs_tile": scene.tile},
         {**sources.DATASETS["dem"], "tiles": scene.sources.get("dem_tiles", [])},
         {**sources.DATASETS["worldcover"], "tiles": scene.sources.get("worldcover_tiles", [])},
+        sources.DATASETS["places"],
     ]
     if rain is not None:
         datasets.append({**sources.DATASETS["rain"], "request_url": rain["request_url"],
@@ -358,12 +378,10 @@ async def cascade_figure(
         geom, how, scene, rain, result = await _risk(
             geometry, bbox, latitude, longitude, radius_km, fire_start, fire_end, rain_start, rain_end, soil_kf
         )
-        projected = transform_geom("EPSG:4326", scene.grid.crs, geom)
-        polygons = [projected["coordinates"]] if projected["type"] == "Polygon" else projected["coordinates"]
-        outline = [polygon[0] for polygon in polygons]
+        outline = _outline(scene, geom)
         heading = title or f"Wildfire {fire_start} → rain {rain['times_60'][0][:10]} to {rain['times_60'][-1][:10]}"
         footer = (
-            "Sentinel-2 L2A dNBR · Copernicus DEM GLO-30 · ESA WorldCover 2021 · Open-Meteo · "
+            "Sentinel-2 L2A dNBR · Copernicus DEM GLO-30 · ESA WorldCover 2021 · Open-Meteo · © OpenStreetMap · "
             "USGS M1 (Staley et al. 2017) · screening, not an official warning"
         )
         png = await asyncio.to_thread(figure.cascade_png, scene, outline, rain, result, heading, footer)
@@ -371,10 +389,61 @@ async def cascade_figure(
             "verdict": _verdict(result, scene, rain),
             "risk_level": result["risk_level"],
             "likelihood": result["likelihood"],
+            "places_at_risk": _places_at_risk(scene),
             "image": {"format": "png", "bytes": len(png)},
             "provenance": _provenance(geom, how, scene, rain),
         }
         return [Image(data=png, format="png"), json.dumps(payload)]
+    except Exception as exc:  # noqa: BLE001
+        return [_error(str(exc))]
+
+
+# Image + text content; no structured (JSON-schema) output for this tool.
+@mcp.tool(structured_output=False)
+async def burn_scar_photos(
+    fire_start: str,
+    fire_end: str | None = None,
+    geometry: dict | str | None = None,
+    bbox: list[float] | str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    radius_km: float | None = None,
+    title: str | None = None,
+) -> list:
+    """
+    Show natural-colour satellite photos of an area before and after a wildfire.
+
+    Use this to let people see the burn scar with their own eyes, e.g. at the
+    start of a report or next to cascade_figure. The two Sentinel-2 photos are
+    the same scenes the burn analysis uses; the analysed area is outlined in
+    yellow and the main towns and villages are named (in bold when they lie
+    within 2 km of steep, badly burned slopes).
+
+    Args:
+        fire_start, fire_end, geometry, bbox, latitude, longitude, radius_km:
+            as in burn_severity.
+        title: Optional figure title, e.g. the fire name.
+
+    Returns:
+        The JPEG image followed by a JSON block with the photo dates, the named
+        places and provenance.
+    """
+    try:
+        geom, how = aoi.to_area(geometry, bbox, latitude, longitude, radius_km)
+        start, end = _fire_period(fire_start, fire_end)
+        scene = await asyncio.to_thread(_burn, geom, start, end)
+        footer = "Copernicus Sentinel-2 L2A (Element 84 / AWS) · place names © OpenStreetMap contributors"
+        jpeg = await asyncio.to_thread(figure.before_after_jpeg, scene, _outline(scene, geom),
+                                       title or f"Wildfire of {fire_start}", footer)
+        payload = {
+            "before": scene.scenes["pre_fire"]["datetime"][:10],
+            "after": scene.scenes["post_fire"]["datetime"][:10],
+            "burned_ha": scene.stats.burned_ha,
+            "places": _burn_summary(scene)["places"],
+            "image": {"format": "jpeg", "bytes": len(jpeg)},
+            "provenance": _provenance(geom, how, scene, None),
+        }
+        return [Image(data=jpeg, format="jpeg"), json.dumps(payload)]
     except Exception as exc:  # noqa: BLE001
         return [_error(str(exc))]
 
