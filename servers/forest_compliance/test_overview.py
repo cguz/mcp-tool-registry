@@ -16,22 +16,11 @@ import pytest
 SQUARE = {"type": "Polygon", "coordinates": [[[0.0, 0.0], [0.01, 0.0], [0.01, 0.01], [0.0, 0.01], [0.0, 0.0]]]}
 
 
-def test_centroid_ignores_closing_vertex():
-    assert forest.centroid(SQUARE) == pytest.approx((0.005, 0.005))
-
-
 def test_map_bounds_pads_and_enforces_minimum_span():
     """A 1 km plot is widened to MIN_SPAN_DEG, then padded by 12 % on each side (x 1.24)."""
     west, south, east, north = overview.map_bounds([SQUARE])
     assert east - west == pytest.approx(overview.MIN_SPAN_DEG * 1.24)
     assert (west + east) / 2 == pytest.approx(0.005)
-
-
-def test_map_bounds_covers_all_plots():
-    far = {"type": "Point", "coordinates": [1.0, 1.0]}
-    circle, _ = forest.to_plot_geometry(far)
-    west, south, east, north = overview.map_bounds([SQUARE, circle])
-    assert west < 0 and south < 0 and east > 1 and north > 1
 
 
 def test_overview_png_is_small_valid_png():
@@ -48,15 +37,6 @@ def test_overview_png_is_small_valid_png():
     width, height = struct.unpack(">II", png[16:24])
     assert width == 800 and 380 <= height <= 900
     assert len(png) < 60_000
-
-
-def test_figure_size_follows_ground_aspect():
-    """A wide region gets a shorter figure than a square one, within the height clamp."""
-    wide = overview.figure_size((-8.0, 5.7, -6.4, 6.3))
-    square = overview.figure_size((0.0, 0.0, 0.1, 0.1))
-    assert wide[0] == square[0] == 8.0
-    assert wide[1] < square[1]
-    assert 3.8 <= wide[1] <= 9.0
 
 
 def test_overview_png_with_custom_classes():

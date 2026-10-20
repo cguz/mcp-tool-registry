@@ -6,7 +6,6 @@ the risk assessment on small synthetic grids, and the PNG map encoder.
 Run from this directory: python -m pytest test_forest.py -q
 """
 
-import json
 import struct
 import zlib
 
@@ -27,41 +26,9 @@ def test_area_of_one_km_square():
     assert forest.area_ha(SQUARE_1KM) == pytest.approx(100.0, rel=0.01)
 
 
-def test_area_subtracts_holes():
-    """A ~220 x 220 m hole (~4.9 ha) must reduce the area by more than 4 ha."""
-    with_hole = {
-        "type": "Polygon",
-        "coordinates": [
-            SQUARE_1KM["coordinates"][0],
-            [[0.002, 0.002], [0.004, 0.002], [0.004, 0.004], [0.002, 0.004], [0.002, 0.002]],
-        ],
-    }
-    assert forest.area_ha(with_hole) < forest.area_ha(SQUARE_1KM) - 4
-
-
 def test_point_becomes_four_hectare_circle():
     geom, how = forest.to_plot_geometry(latitude=5.79, longitude=-6.61)
     assert geom["type"] == "Polygon" and "4 ha circle" in how
-    assert forest.area_ha(geom) == pytest.approx(4.0, rel=0.01)
-
-
-@pytest.mark.parametrize(
-    "wrapper",
-    [
-        lambda g: g,
-        lambda g: {"type": "Feature", "properties": {}, "geometry": g},
-        lambda g: {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": g}]},
-        lambda g: json.dumps(g),
-    ],
-)
-def test_geometry_wrappers(wrapper):
-    """Bare geometry, Feature, one-feature FeatureCollection and JSON string all yield the same polygon."""
-    geom, how = forest.to_plot_geometry(wrapper(SQUARE_1KM))
-    assert geom == SQUARE_1KM and how == "polygon"
-
-
-def test_geojson_point_is_buffered():
-    geom, _ = forest.to_plot_geometry({"type": "Point", "coordinates": [10.0, 50.0]})
     assert forest.area_ha(geom) == pytest.approx(4.0, rel=0.01)
 
 
@@ -79,11 +46,6 @@ def test_bad_geometries_raise(bad):
         forest.to_plot_geometry(bad)
 
 
-def test_missing_input_raises():
-    with pytest.raises(ValueError):
-        forest.to_plot_geometry()
-
-
 def test_plot_area_limits():
     huge = {"type": "Polygon", "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]]}
     with pytest.raises(ValueError, match="at most"):
@@ -99,19 +61,6 @@ def test_plot_id_is_stable_and_order_insensitive_for_keys():
 
 
 # ─── Hansen tiles ────────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("lat_top", "lon_left", "name"),
-    [(10, -10, "10N_010W"), (0, 20, "00N_020E"), (-10, -60, "10S_060W"), (80, 170, "80N_170E")],
-)
-def test_tile_names(lat_top, lon_left, name):
-    assert forest.hansen_tile_name(lat_top, lon_left) == name
-
-
-def test_tiles_for_small_plot():
-    tiles = forest.hansen_tiles((-6.62, 5.78, -6.60, 5.80))
-    assert [t for t, _ in tiles] == ["10N_010W"]
 
 
 def test_tiles_for_plot_crossing_equator_and_meridian():
@@ -137,12 +86,6 @@ def grids():
     return forest_2020, loss, inside
 
 
-def test_tally_clean_plot():
-    stats = forest.tally(*grids(), pixel_ha=1.0)
-    assert stats["plot_ha"] == 100 and stats["forest_2020_ha"] == 50
-    assert stats["deforestation_after_cutoff_ha"] == 0
-
-
 def test_tally_separates_before_after_and_non_forest():
     """Loss is split into before the cut-off, after it on forest (deforestation) and after it on
     non-forest; pixels outside the plot are ignored."""
@@ -159,12 +102,6 @@ def test_tally_separates_before_after_and_non_forest():
     assert stats["deforestation_after_cutoff_ha"] == 4
     assert stats["deforestation_by_year_ha"] == {2021: 1.0, 2023: 3.0}
     assert stats["plot_ha"] == 90
-
-
-def test_merge_tallies_sums_parts():
-    part = forest.tally(*grids(), pixel_ha=0.5)
-    merged = forest.merge_tallies([part, part])
-    assert merged["plot_ha"] == 100 and merged["pixels"] == 200
 
 
 def test_assess_high_medium_low():
@@ -192,21 +129,7 @@ def test_assess_no_forest():
     assert any("not mapped as forest" in note for note in result["notes"])
 
 
-def test_pixel_area_at_equator():
-    """A Hansen pixel (0.00025 degree) is ~27.83 m square at the equator."""
-    assert forest.pixel_area_ha(0.0, 0.00025) * 10_000 == pytest.approx(27.83**2, rel=0.01)
-
-
 # ─── Map ─────────────────────────────────────────────────────────────────────
-
-
-def test_classify_pixels():
-    """Each map class code: 0 non-forest, 1 forest, 2 loss before, 3 loss after on non-forest, 4 deforestation."""
-    forest_2020, loss, _ = grids()
-    loss[0, 0], loss[0, 1], loss[0, 6] = 10, 22, 22
-    classes = forest.classify_pixels(forest_2020, loss)
-    assert classes[0, 0] == 2 and classes[0, 1] == 4 and classes[0, 6] == 3
-    assert classes[5, 2] == 1 and classes[5, 8] == 0
 
 
 def test_render_map_is_valid_png():

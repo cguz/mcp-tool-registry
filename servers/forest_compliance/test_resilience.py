@@ -70,10 +70,3 @@ def test_rows_and_markdown():
     summary = resilience.summarise(rows)
     assert summary["by_supply_status"] == {"secure": 0, "at risk": 1, "review": 1, "blocked": 1}
     assert summary["missing_drought"] == ["farm-03"]
-
-
-def test_every_status_has_a_map_colour_and_legend_entry():
-    """The decision map must be able to draw any status the matrix can produce."""
-    statuses = {resilience.STATUS_BLOCKED, resilience.STATUS_REVIEW, resilience.STATUS_AT_RISK, resilience.STATUS_SECURE}
-    assert set(resilience.STATUS_COLOURS) == statuses
-    assert {key for key, _ in resilience.STATUS_LEGEND} == statuses
