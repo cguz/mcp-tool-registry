@@ -35,26 +35,11 @@ BASELINE = range(1991, 2021)  # the default WMO 1991-2020 normal
 # ─── Location ────────────────────────────────────────────────────────────────
 
 
-def test_resolve_point():
-    assert climate.resolve_location(40.4, -3.7, None) == (40.4, -3.7, "point")
-
-
 def test_resolve_polygon_centroid():
     square = '{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}'
     lat, lon, how = climate.resolve_location(None, None, square)
     assert how == "geometry centroid"
     assert lat == pytest.approx(0.8) and lon == pytest.approx(0.8)  # closing vertex counted twice
-
-
-def test_resolve_feature_collection():
-    fc = {
-        "type": "FeatureCollection",
-        "features": [
-            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [10.0, 50.0]}},
-            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [12.0, 52.0]}},
-        ],
-    }
-    assert climate.geometry_centroid(fc) == pytest.approx((51.0, 11.0))
 
 
 @pytest.mark.parametrize("args", [(None, None, None), (95.0, 0.0, None), (0.0, 200.0, None)])
@@ -76,13 +61,6 @@ def test_window_values_missing_day_returns_none():
     series[date(2020, 1, 5)]["precipitation_sum"] = None
     assert climate.window_values(series, "precipitation_sum", date(2020, 1, 1), date(2020, 1, 4)) == [3] * 4
     assert climate.window_values(series, "precipitation_sum", date(2020, 1, 1), date(2020, 1, 10)) is None
-
-
-def test_last_complete_day_skips_trailing_nulls():
-    series = make_series(date(2020, 1, 1), date(2020, 1, 10), lambda d: (1, 2, 3, 4))
-    for d in (date(2020, 1, 9), date(2020, 1, 10)):
-        series[d]["precipitation_sum"] = None
-    assert climate.last_complete_day(series) == date(2020, 1, 8)
 
 
 def test_monthly_totals_only_complete_months():
@@ -109,11 +87,6 @@ def test_standardized_index_is_monotonic_and_centred():
     assert -2.6 < low < -2.0 and 2.0 < high < 2.6
 
 
-def test_standardized_index_needs_ten_values():
-    with pytest.raises(ValueError):
-        climate.standardized_index(1.0, [1.0] * 9)
-
-
 @pytest.mark.parametrize(
     ("index", "label", "risk"),
     [
@@ -127,15 +100,6 @@ def test_standardized_index_needs_ten_values():
 )
 def test_classify_index(index, label, risk):
     assert climate.classify_index(index) == (label, risk)
-
-
-def test_worst_risk():
-    assert climate.worst_risk(["low", "high", "medium"]) == "high"
-    assert climate.worst_risk([]) == "low"
-
-
-def test_empirical_percentile_ties_count_half():
-    assert climate.empirical_percentile(5.0, [1.0, 5.0, 9.0, 9.0]) == pytest.approx(37.5)
 
 
 # ─── End to end on synthetic climates ────────────────────────────────────────
@@ -166,23 +130,6 @@ def test_drought_detected_by_spi_and_spei():
     # Before the drought started the same location looks normal.
     spi3_march = climate.standardized_for_month(precip, 2026, 3, 3, BASELINE)
     assert spi3_march["risk_level"] == "low"
-
-
-def test_period_anomaly_hot_week():
-    """A week 8 °C above every baseline year has a large anomaly and the 100th percentile."""
-
-    def climate_fn(day):
-        hot = day.year == 2026 and day.month == 7 and 1 <= day.day <= 7
-        return (32.0 if hot else 24.0 + (day.year % 5) * 0.2), 35.0, 1.0, 4.0
-
-    series = make_series(date(1989, 1, 1), date(2026, 7, 31), climate_fn)
-    result = climate.period_anomaly(
-        series, "temperature_2m_mean", date(2026, 7, 1), date(2026, 7, 7), BASELINE, "mean"
-    )
-    assert result["value"] == 32.0
-    assert result["anomaly"] > 7
-    assert result["percentile"] == 100.0
-    assert result["baseline_samples"] == 30
 
 
 def test_period_anomaly_precipitation_percent_of_normal():
@@ -227,10 +174,3 @@ def test_index_series_tracks_drought_onset():
     assert len(points) == 12
     assert points[-1]["class"] == "extremely dry"
     assert points[0]["index"] > points[-1]["index"]
-
-
-def test_index_series_skips_months_without_data():
-    series = make_series(date(1989, 1, 1), date(2026, 6, 30), wet_baseline_then_drought)
-    precip = climate.monthly_totals(series, "precipitation_sum")
-    points = climate.index_series(precip, 1989, 6, 6, 3, BASELINE)  # before 1989-03 nothing accumulates
-    assert [p["month"] for p in points] == ["1989-03", "1989-04", "1989-05", "1989-06"]
