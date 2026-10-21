@@ -296,6 +296,28 @@ def parse_month(text: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+def choose_end_month(
+    requested: str | None, latest: tuple[int, int]
+) -> tuple[int, int, str | None]:
+    """Return (year, month, note) for the end of the accumulation window.
+
+    Without a request this is the latest complete ERA5 month. A request later
+    than that (agents often ask for the current, unfinished month) is moved
+    back to it instead of failing, and the note says so: refusing it made
+    small models retry with a date a whole year too early.
+    """
+    if not requested:
+        return latest[0], latest[1], None
+    year, month = parse_month(requested)
+    if (year, month) > latest:
+        note = (
+            f"end_month {year}-{month:02d} has no complete ERA5 data yet; "
+            f"used the latest complete month, {latest[0]}-{latest[1]:02d}"
+        )
+        return latest[0], latest[1], note
+    return year, month, None
+
+
 def _month_back(year: int, month: int, back: int) -> tuple[int, int]:
     """Return the (year, month) that lies ``back`` months before (year, month).
 

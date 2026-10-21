@@ -356,7 +356,8 @@ async def drought_index(
         geometry:  Alternatively, a GeoJSON Point/Polygon/Feature (object or string);
                    its centroid is used.
         end_month: Last month of the accumulation window, YYYY-MM. Defaults to
-                   the latest complete month available in ERA5.
+                   the latest complete month available in ERA5; a later month
+                   is moved back to it (see "note" in the result).
         scales:    Accumulation windows in months, each 1-24 (default [3, 6]).
                    3 months reflects soil moisture / crops, 6-12 months
                    reservoirs and groundwater.
@@ -380,15 +381,7 @@ async def drought_index(
 
         precip = climate.monthly_totals(series, "precipitation_sum")  # SPI input
         balance = climate.water_balance(series)  # SPEI input
-        latest_year, latest_month = climate.last_complete_month(precip)
-        if end_month:
-            year, month = climate.parse_month(end_month)
-            if (year, month) > (latest_year, latest_month):
-                raise ValueError(
-                    f"latest complete ERA5 month is {latest_year}-{latest_month:02d}; choose an earlier end_month"
-                )
-        else:
-            year, month = latest_year, latest_month
+        year, month, note = climate.choose_end_month(end_month, climate.last_complete_month(precip))
 
         spi = [climate.standardized_for_month(precip, year, month, s, baseline) for s in scales]
         spei = [climate.standardized_for_month(balance, year, month, s, baseline) for s in scales]
@@ -404,6 +397,7 @@ async def drought_index(
             "spei": spei,
             "hot_days_last_90": heat,
             "risk_level": overall,
+            **({"note": note} if note else {}),
             "summary": (
                 f"Overall {overall} risk. Driest signal: "
                 f"{'SPEI' if driest in spei else 'SPI'}-{driest['scale_months']} = {driest['index']} "

@@ -181,3 +181,11 @@ def test_parse_month_accepts_month_or_date_and_names_the_format():
     assert climate.parse_month("2026-09-01") == (2026, 9)
     with pytest.raises(ValueError, match="YYYY-MM"):
         climate.parse_month("September 2026")
+
+
+def test_choose_end_month_moves_an_unfinished_month_back_with_a_note():
+    assert climate.choose_end_month(None, (2026, 9)) == (2026, 9, None)
+    assert climate.choose_end_month("2026-03", (2026, 9)) == (2026, 3, None)
+    year, month, note = climate.choose_end_month("2026-10", (2026, 9))
+    assert (year, month) == (2026, 9)
+    assert "2026-09" in note
