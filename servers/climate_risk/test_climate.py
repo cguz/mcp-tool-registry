@@ -174,3 +174,10 @@ def test_index_series_tracks_drought_onset():
     assert len(points) == 12
     assert points[-1]["class"] == "extremely dry"
     assert points[0]["index"] > points[-1]["index"]
+
+
+def test_parse_month_accepts_month_or_date_and_names_the_format():
+    assert climate.parse_month("2026-09") == (2026, 9)
+    assert climate.parse_month("2026-09-01") == (2026, 9)
+    with pytest.raises(ValueError, match="YYYY-MM"):
+        climate.parse_month("September 2026")

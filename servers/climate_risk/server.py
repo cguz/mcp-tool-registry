@@ -382,7 +382,7 @@ async def drought_index(
         balance = climate.water_balance(series)  # SPEI input
         latest_year, latest_month = climate.last_complete_month(precip)
         if end_month:
-            year, month = (int(part) for part in end_month.split("-"))
+            year, month = climate.parse_month(end_month)
             if (year, month) > (latest_year, latest_month):
                 raise ValueError(
                     f"latest complete ERA5 month is {latest_year}-{latest_month:02d}; choose an earlier end_month"

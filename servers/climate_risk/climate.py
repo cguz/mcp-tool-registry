@@ -21,6 +21,7 @@ published yet. Monthly aggregates are ``dict[(year, month), float]``.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from datetime import date, timedelta
 from statistics import NormalDist, mean, pstdev
@@ -278,6 +279,21 @@ def water_balance(series: Series) -> dict[tuple[int, int], float]:
     precip = monthly_totals(series, "precipitation_sum")
     et0 = monthly_totals(series, "et0_fao_evapotranspiration")
     return {k: precip[k] - et0[k] for k in precip.keys() & et0.keys()}
+
+
+def parse_month(text: str) -> tuple[int, int]:
+    """Return (year, month) from "YYYY-MM".
+
+    Agents often send a full date for a month field, so "YYYY-MM-DD" is read
+    as its month instead of being refused.
+
+    Raises:
+        ValueError: Naming the expected format, so the agent can retry.
+    """
+    match = re.fullmatch(r"\s*(\d{4})-(\d{1,2})(?:-\d{1,2})?\s*", str(text))
+    if not match or not 1 <= int(match.group(2)) <= 12:
+        raise ValueError(f"end_month must be YYYY-MM, for example 2026-09; got {text!r}")
+    return int(match.group(1)), int(match.group(2))
 
 
 def _month_back(year: int, month: int, back: int) -> tuple[int, int]:
