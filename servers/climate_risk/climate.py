@@ -101,13 +101,31 @@ def geometry_centroid(geometry: str | dict) -> tuple[float, float]:
     Raises:
         ValueError: If the string is not valid JSON or holds no coordinates.
     """
-    obj = json.loads(geometry) if isinstance(geometry, str) else geometry
+    try:
+        obj = json.loads(geometry) if isinstance(geometry, str) else geometry
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"geometry is not valid GeoJSON ({exc.msg}); pass a GeoJSON object, a "
+            "'west,south,east,north' bbox, or latitude and longitude"
+        ) from exc
     points = list(_positions(obj))
     if not points:
         raise ValueError("geometry has no coordinates")
     lon = mean(p[0] for p in points)
     lat = mean(p[1] for p in points)
     return lat, lon
+
+
+def parse_bbox(text: str) -> tuple[float, float, float, float] | None:
+    """Return (west, south, east, north) from "west,south,east,north", or None if ``text`` is not one."""
+    parts = text.split(",")
+    if len(parts) != 4:
+        return None
+    try:
+        west, south, east, north = (float(part) for part in parts)
+    except ValueError:
+        return None
+    return west, south, east, north
 
 
 def resolve_location(
@@ -117,14 +135,20 @@ def resolve_location(
 ) -> tuple[float, float, str]:
     """Return (lat, lon, how) from either a lat/lon pair or a GeoJSON geometry.
 
-    The geometry wins when both are given. ``how`` ("point" or "geometry
-    centroid") is echoed in the provenance so the agent knows which input was
-    used.
+    The geometry wins when both are given. It may also be a bounding box string
+    "west,south,east,north", the format geocode_place returns, so a place name
+    can go straight from the geocoder to these tools. ``how`` ("point",
+    "geometry centroid" or "bbox centre") is echoed in the provenance so the
+    agent knows which input was used.
 
     Raises:
         ValueError: If neither input is usable or the point is off the globe.
     """
-    if geometry:
+    bbox = parse_bbox(geometry) if isinstance(geometry, str) else None
+    if bbox:
+        west, south, east, north = bbox
+        lat, lon, how = (south + north) / 2, (west + east) / 2, "bbox centre"
+    elif geometry:
         lat, lon = geometry_centroid(geometry)
         how = "geometry centroid"
     elif latitude is not None and longitude is not None:

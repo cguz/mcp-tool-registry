@@ -42,6 +42,17 @@ def test_resolve_polygon_centroid():
     assert lat == pytest.approx(0.8) and lon == pytest.approx(0.8)  # closing vertex counted twice
 
 
+def test_resolve_bbox_string_centre():
+    lat, lon, how = climate.resolve_location(None, None, "-6.7533,5.6250,-6.4333,5.9450")  # geocode_place output
+    assert how == "bbox centre"
+    assert lat == pytest.approx(5.785) and lon == pytest.approx(-6.5933)
+
+
+def test_resolve_bad_geometry_names_the_formats():
+    with pytest.raises(ValueError, match="west,south,east,north"):
+        climate.resolve_location(None, None, "Soubre")
+
+
 @pytest.mark.parametrize("args", [(None, None, None), (95.0, 0.0, None), (0.0, 200.0, None)])
 def test_resolve_rejects_bad_input(args):
     with pytest.raises(ValueError):

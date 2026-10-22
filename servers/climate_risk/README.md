@@ -15,10 +15,12 @@ hackathon thread B ("was last week unusually hot in Madrid?").
 | `drought_index` | Is this farm / city in drought? | Location; optional `end_month` (YYYY-MM), `scales` (months, default `[3, 6]`) | SPI and SPEI per scale with McKee class, hot days in the last 90 days, and an overall `risk_level` (`low` / `medium` / `high`) |
 | `drought_chart` | How did drought develop here? | Location; optional `label` (shown in the title), `scale` (default 3), `months` (12-120, default 36) | PNG chart (~15-20 KB): monthly SPEI bars coloured by drought class, SPI line, -1 / -1.5 / -2 thresholds; then a JSON summary (latest values, months in drought, driest month, provenance) |
 
-**Location** (same for both tools): `latitude` + `longitude`, **or** `geometry`
+**Location** (same for all tools): `latitude` + `longitude`, **or** `geometry`
 (GeoJSON Point/Polygon/Feature/FeatureCollection, as an object or a string; its
 centroid is used). The agent can therefore pass the same plot to this server and
-to the forest server.
+to the forest server. `geometry` also takes a `"west,south,east,north"` bounding
+box, the format `geocode_place` returns, so a place name can go straight from the
+geocoder to these tools (the box centre is used).
 
 Both accept `baseline_start_year` / `baseline_end_year` (default 1991-2020, the
 WMO standard climate normal; at least 10 years).

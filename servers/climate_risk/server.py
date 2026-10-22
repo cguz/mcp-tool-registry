@@ -230,7 +230,7 @@ def _provenance(meta: dict, lat: float, lon: float, how: str, baseline: range, m
         meta: Metadata from ``_load`` (grid cell, request URL, cache info).
         lat: Requested latitude, before snapping to the ERA5 grid.
         lon: Requested longitude, before snapping to the ERA5 grid.
-        how: "point" or "geometry centroid", from ``resolve_location``.
+        how: "point", "geometry centroid" or "bbox centre", from ``resolve_location``.
         baseline: Baseline years used.
         method: One-sentence description of the computation, per tool.
     """
@@ -281,8 +281,9 @@ async def climate_anomaly(
                      start_date; ERA5 lags real time by about a week).
         latitude:    Latitude in decimal degrees (WGS84). Use with longitude.
         longitude:   Longitude in decimal degrees (WGS84).
-        geometry:    Alternatively, a GeoJSON Point/Polygon/Feature (object or string);
-                     its centroid is used.
+        geometry:    Alternatively, a GeoJSON Point/Polygon/Feature (object or string), or a
+                     "west,south,east,north" bbox as geocode_place returns it;
+                     its centre is used.
         baseline_start_year: First year of the reference climate (default 1991).
         baseline_end_year:   Last year of the reference climate (default 2020).
 
@@ -353,8 +354,9 @@ async def drought_index(
     Args:
         latitude:  Latitude in decimal degrees (WGS84). Use with longitude.
         longitude: Longitude in decimal degrees (WGS84).
-        geometry:  Alternatively, a GeoJSON Point/Polygon/Feature (object or string);
-                   its centroid is used.
+        geometry:  Alternatively, a GeoJSON Point/Polygon/Feature (object or string), or a
+                   "west,south,east,north" bbox as geocode_place returns it;
+                   its centre is used.
         end_month: Last month of the accumulation window, YYYY-MM. Defaults to
                    the latest complete month available in ERA5; a later month
                    is moved back to it (see "note" in the result).
@@ -440,8 +442,9 @@ async def drought_chart(
     Args:
         latitude:  Latitude in decimal degrees (WGS84). Use with longitude.
         longitude: Longitude in decimal degrees (WGS84).
-        geometry:  Alternatively, a GeoJSON Point/Polygon/Feature (object or string);
-                   its centroid is used.
+        geometry:  Alternatively, a GeoJSON Point/Polygon/Feature (object or string), or a
+                   "west,south,east,north" bbox as geocode_place returns it;
+                   its centre is used.
         label:     Optional name shown in the chart title, e.g. a farm id.
         scale:     Accumulation window in months, 1-24 (default 3, crops).
         months:    How many months to show, 12-120 (default 36).
