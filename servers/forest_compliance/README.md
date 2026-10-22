@@ -59,8 +59,13 @@ models cannot misreport a risk level. Supply status per plot:
 |---|---|---|
 | high | any | 🔴 blocked |
 | medium (or not assessed) | any | 🟠 review |
+| low | unknown (no drought result for the plot) | 🟠 review |
 | low | medium or high | 🟠 at risk |
-| low | low or unknown | 🟢 secure |
+| low | low | 🟢 secure |
+
+`drought` is required: called without any drought data, the tool returns an error
+that tells the agent to run `drought_index` for each plot first. Otherwise every
+plot with a clean EUDR record would look "secure".
 
 The recommendation joins a fixed EUDR action and a fixed drought action for the
 two levels.

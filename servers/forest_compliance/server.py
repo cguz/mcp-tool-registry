@@ -441,10 +441,11 @@ async def supply_chain_resilience(plots: dict | str, drought: dict | str | None 
     Args:
         plots:   GeoJSON FeatureCollection (object or string) with up to 25
                  features, as for eudr_check_plots; properties.id names each plot.
-        drought: Object mapping each plot id to its drought risk: either the
-                 level ("low", "medium", "high") or the full drought_index
-                 result for that plot (its top-level risk_level is used).
-                 Plots left out show drought risk "unknown".
+        drought: Required. Object mapping each plot id to its drought risk:
+                 either the level ("low", "medium", "high") or the full
+                 drought_index result for that plot (its top-level risk_level
+                 is used). Plots left out show drought risk "unknown" and
+                 supply status "review".
 
     Returns:
         The decision map (PNG: red = blocked, yellow = review, orange = at risk,
@@ -456,6 +457,7 @@ async def supply_chain_resilience(plots: dict | str, drought: dict | str | None 
     try:
         # Parse the drought argument first: a malformed one fails fast, before the slow raster reads.
         drought_by_id = resilience.parse_drought(drought)
+        resilience.require_drought(drought_by_id)
         results, eudr_summary, provenance, drawn = await _assess_collection(plots)
         rows = resilience.build_rows(results, drought_by_id)
         status_by_id = {row["id"]: row["supply_status"] for row in rows}

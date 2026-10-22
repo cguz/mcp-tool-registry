@@ -42,7 +42,7 @@ DROUGHT_ACTIONS = {
     "low": "Drought: no action.",
     "medium": "Drought: monitor rainfall; plan shade trees and mulching.",
     "high": "Drought: expect lower yields; prioritise for drought support or insurance and line up alternative supply.",
-    UNKNOWN: "Drought: no drought result provided.",
+    UNKNOWN: "Drought: not checked; run drought_index for this plot.",
 }
 
 
@@ -56,7 +56,7 @@ STATUS_COLOURS = {
 }
 STATUS_LEGEND = [
     (STATUS_BLOCKED, "blocked: forest cleared after 2020"),
-    (STATUS_REVIEW, "review: small forest loss, verify first"),
+    (STATUS_REVIEW, "review: small forest loss or no drought data"),
     (STATUS_AT_RISK, "at risk: legal, but drought"),
     (STATUS_SECURE, "secure"),
 ]
@@ -106,16 +106,32 @@ def parse_drought(drought: dict | str | None) -> dict[str, str]:
     return {str(plot_ref): drought_level(value) for plot_ref, value in mapping.items()}
 
 
+def require_drought(drought_by_id: dict[str, str]) -> None:
+    """Refuse a matrix without any drought data, and tell the agent how to get it.
+
+    Without drought every EUDR-clean plot would look "secure", which is the one
+    claim the matrix must not make by default.
+
+    Raises:
+        ValueError: no plot has a drought risk.
+    """
+    if not drought_by_id:
+        raise ValueError(
+            "drought is missing: first call drought_index (climate_risk server) for each plot, passing its "
+            "geometry, then pass drought as {plot id: risk_level}. For the EUDR check alone use eudr_check_plots"
+        )
+
+
 def supply_status(eudr: str, drought: str) -> str:
     """Overall supply status: EUDR decides market access, drought decides reliability.
 
     A plot that failed the EUDR assessment (UNKNOWN) is treated like "medium":
-    it cannot be cleared without a human look. Missing drought data does not
-    downgrade a plot; it is reported in the summary instead.
+    it cannot be cleared without a human look. A plot without a drought result
+    is not "secure" either: it also needs review.
     """
     if eudr == "high":
         return STATUS_BLOCKED
-    if eudr in ("medium", UNKNOWN):
+    if eudr in ("medium", UNKNOWN) or drought == UNKNOWN:
         return STATUS_REVIEW
     if drought in ("medium", "high"):
         return STATUS_AT_RISK

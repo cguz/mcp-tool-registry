@@ -42,11 +42,11 @@ def test_parse_drought_accepts_string_and_rejects_lists():
         ("low", "high", "at risk"),
         ("low", "medium", "at risk"),
         ("low", "low", "secure"),
-        ("low", "unknown", "secure"),
+        ("low", "unknown", "review"),
     ],
 )
 def test_supply_status(eudr, drought, status):
-    """EUDR high blocks, EUDR medium/unknown needs review, then drought decides at risk vs secure."""
+    """EUDR high blocks; EUDR medium/unknown or no drought data needs review; then drought decides."""
     assert resilience.supply_status(eudr, drought) == status
 
 
@@ -70,3 +70,11 @@ def test_rows_and_markdown():
     summary = resilience.summarise(rows)
     assert summary["by_supply_status"] == {"secure": 0, "at risk": 1, "review": 1, "blocked": 1}
     assert summary["missing_drought"] == ["farm-03"]
+
+
+def test_require_drought_names_the_tool_to_call():
+    with pytest.raises(ValueError, match="drought_index"):
+        resilience.require_drought(resilience.parse_drought(None))
+    with pytest.raises(ValueError, match="drought_index"):
+        resilience.require_drought(resilience.parse_drought({}))
+    resilience.require_drought({"farm-01": "unknown"})  # some data passed: per-plot gaps show as "review"
