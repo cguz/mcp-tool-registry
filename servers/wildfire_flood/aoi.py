@@ -65,7 +65,11 @@ def to_area(
 
     area = area_km2(geom)
     if area > MAX_AREA_KM2:
-        raise ValueError(f"the area is {area:,.0f} km²; the limit is {MAX_AREA_KM2:,.0f} km²")
+        raise ValueError(
+            f"the area is {area:,.0f} km²; the limit is {MAX_AREA_KM2:,.0f} km². Pass the bbox of one fire "
+            "(get_effis_burnt_areas returns one per fire), not a whole region: outside a burn scar the "
+            "before/after comparison only picks up noise"
+        )
     return geom, how
 
 

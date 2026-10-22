@@ -49,3 +49,8 @@ def test_coverage_of_footprint():
     half = aoi.to_area(bbox=[0, 0, 0.1, 0.2])[0]
     assert aoi.coverage(geom, geom) == 1.0
     assert aoi.coverage(geom, half) == pytest.approx(0.5)
+
+
+def test_area_limit_error_names_the_fix():
+    with pytest.raises(ValueError, match="bbox of one fire"):
+        aoi.to_area(bbox=[-0.9344, 41.3478, 0.7713, 42.9245])  # a whole province, ~24,700 km²
