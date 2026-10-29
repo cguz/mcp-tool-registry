@@ -387,7 +387,8 @@ async def drought_index(
 
         spi = [climate.standardized_for_month(precip, year, month, s, baseline) for s in scales]
         spei = [climate.standardized_for_month(balance, year, month, s, baseline) for s in scales]
-        heat = climate.hot_days(series, climate.last_complete_day(series), 90, baseline)
+        # ERA5 temperature can lag a day or two behind precipitation, so the heat window ends on its own last day.
+        heat = climate.hot_days(series, climate.last_complete_day(series, "temperature_2m_max"), 90, baseline)
 
         # Overall risk is the worst signal: any one dry index or heat stress is enough to flag it.
         overall = climate.worst_risk([e["risk_level"] for e in spi + spei] + [heat["risk_level"]])
